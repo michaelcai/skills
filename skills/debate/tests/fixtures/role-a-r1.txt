@@ -1,0 +1,11 @@
+## TL;DR
+Redis Pub/Sub does not guarantee message delivery; during horizontal scaling, losing a subscriber silently drops notifications.
+We should switch to Streams + consumer group.
+
+## Argument
+Look at `src/notify/redis_bus.py:42` — it uses the `PUBLISH` command, so any messages sent while a subscriber is offline are simply discarded.
+During a k8s rolling restart, the old pod has been SIGTERM'd before the new pod comes up, and every notification emitted in that window is lost.
+Redis Streams with a consumer group gives us at-least-once: when an offline pod reconnects,
+it can pull the backlog via `XREADGROUP`. The cost is manual ack and a step up in complexity.
+
+But compared with silent message loss (where the user has no idea what happened), it's worth that cost.

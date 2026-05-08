@@ -1,0 +1,3 @@
+This is an output that has no TL;DR section.
+The agent occasionally forgets the format constraint from the system prompt.
+The test should detect this and let the main agent know that TL;DR extraction failed.

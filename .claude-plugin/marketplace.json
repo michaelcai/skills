@@ -1,0 +1,34 @@
+{
+  "name": "michaelcai-skills",
+  "id": "michaelcai-skills",
+  "owner": {
+    "name": "michaelcai"
+  },
+  "metadata": {
+    "description": "Michael Cai's agent skills collection: multi-model debate, persistent backend sessions, and supporting tools",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "michaelcai-skills",
+      "source": "./",
+      "description": "Multi-model peer debate (claude + opencode + codex...) and a reusable backend-session abstraction",
+      "version": "0.1.0",
+      "author": {
+        "name": "michaelcai"
+      },
+      "keywords": [
+        "debate",
+        "multi-model",
+        "multi-agent",
+        "agent-session",
+        "backend",
+        "review",
+        "claude",
+        "opencode",
+        "codex"
+      ],
+      "category": "workflow"
+    }
+  ]
+}

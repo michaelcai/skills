@@ -1,0 +1,9 @@
+## TL;DR
+The "semantic folding" risk you raised is real. I concede that TL;DR's reliability degrades after round 2,
+and orchestration decisions must rely on the stance-label distribution rather than TL;DR text alone.
+[stance: concede]
+
+## Argument
+Re-reading the concurrent path in `session_manager.py:create_session()`,
+indeed a TL;DR that says "add a lock" cannot distinguish `threading.Lock` from `fcntl.flock` semantically.
+Proposed fix: when orchestrating, the moderator must look at the stance-label distribution (extracted via grep) as the structured signal of convergence.

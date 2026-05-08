@@ -1,0 +1,2 @@
+## TL;DR
+Only a TL;DR section, no Argument (non-conformant but possible).

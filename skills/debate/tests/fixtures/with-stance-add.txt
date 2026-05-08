@@ -1,0 +1,10 @@
+## TL;DR
+We should also factor in prompt cache hit rate. `--resume` reuses the session, the prompt prefix stays stable,
+and across rounds we get a cache discount. That's a hidden gain on top of TL;DR throttling.
+[stance: add]
+
+## Argument
+Anthropic's prompt cache cuts up to 90% of input cost on a hit within the 5-minute TTL.
+In multi-round debate, `--resume` preserves the session history,
+so each round's prompt prefix (system + dialogue history) stays stable, with measurable cost savings.
+This is an additional signal beyond this round's focus and does not directly take a stance toward the Defender / Role A.

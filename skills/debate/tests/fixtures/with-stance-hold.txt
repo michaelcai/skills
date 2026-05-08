@@ -1,0 +1,9 @@
+## TL;DR
+Mandatory TL;DR does not lose evidence: the full Argument is still written to file as before; TL;DR is just an index layer.
+The moderator reads the full text on demand and won't misjudge convergence.
+[stance: hold]
+
+## Argument
+The challenge presupposes the wrong model — "TL;DR replaces Argument". The actual design has both layers coexisting:
+the full Argument (150–300 words, with code references and edge cases) is always written to `$DEBATE_DIR/{role}-rN.txt`.
+TL;DR is just the sed-extracted index; at checkpoint time the moderator still Reads the full Argument on demand.
