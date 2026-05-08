@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -266,14 +267,13 @@ class OpencodeDriver(Driver):
         if result.returncode != 0:
             raise RuntimeError(f"oc-task begin failed: {result.stderr.strip()}")
 
-        env = {}
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("export "):
-                line = line[len("export ") :]
-            if "=" in line:
-                k, _, v = line.partition("=")
-                env[k.strip()] = v.strip().strip('"').strip("'")
+        # `oc-task begin` may emit either:
+        #   export OC_TASK_ID=... OC_TASK_PORT=...        (one line, multiple pairs)
+        #   export OC_TASK_ID=...\nexport OC_TASK_PORT=... (multiple lines)
+        # Capture every KEY=VALUE token regardless.
+        env: dict[str, str] = {}
+        for k, v in re.findall(r"(\w+)=(\S+)", result.stdout):
+            env[k] = v.strip('"').strip("'")
 
         meta["oc_task_id"] = env.get("OC_TASK_ID")
         meta["oc_task_port"] = env.get("OC_TASK_PORT")
@@ -448,10 +448,12 @@ class CodexDriver(Driver):
         return shutil.which("codex")
 
     def _session_cwd(self, role_id: str, state_dir: Optional[str]) -> Path:
-        """Each role gets an isolated cwd so `codex exec resume --last` is unambiguous."""
+        """Each role gets an isolated cwd so `codex exec resume --last` is unambiguous.
+        Always returns an absolute path so subsequent commands don't get confused by
+        relative-path interactions with subprocess `cwd=` and `--cd`."""
         cwd = session_dir(role_id, state_dir) / "cwd"
         cwd.mkdir(parents=True, exist_ok=True)
-        return cwd
+        return cwd.resolve()
 
     def _common_flags(self) -> list[str]:
         # Non-interactive: bypass approvals; sandbox read-only so a role can't damage the host
@@ -485,14 +487,16 @@ class CodexDriver(Driver):
         }
         write_meta(role_id, state_dir, meta)
 
+        # spawn: use --cd (codex exec supports it). Don't also set subprocess cwd= or
+        # codex would try to resolve the same path twice.
         cmd = ["codex", "exec", *self._common_flags(),
                "--cd", str(cwd),
-               "--output-last-message", str(r0_out)]
+               "--output-last-message", str(r0_out.resolve())]
         if model:
             cmd += ["-m", model]
 
         result = subprocess.run(
-            cmd, input=prompt_content, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT
+            cmd, input=prompt_content, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
         )
         if result.returncode != 0:
             append_log(role_id, state_dir, f"spawn rc={result.returncode}\nstderr:\n{result.stderr}")
@@ -525,15 +529,17 @@ class CodexDriver(Driver):
 
         cwd = Path(meta.get("cwd") or self._session_cwd(role_id, state_dir))
 
+        # send: `codex exec resume` does NOT accept --cd; use subprocess cwd= so that
+        # `--last` resolves to the session created in this exact directory by spawn.
         prompt_content = rN_in.read_text()
         cmd = ["codex", "exec", "resume", "--last", *self._common_flags(),
-               "--cd", str(cwd),
-               "--output-last-message", str(rN_out)]
+               "--output-last-message", str(rN_out.resolve())]
         if meta.get("model") and meta["model"] != "default":
             cmd += ["-m", meta["model"]]
 
         result = subprocess.run(
-            cmd, input=prompt_content, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT
+            cmd, input=prompt_content, capture_output=True, text=True,
+            cwd=str(cwd), timeout=DEFAULT_TIMEOUT,
         )
         if result.returncode != 0:
             append_log(role_id, state_dir, f"send r{n} rc={result.returncode}\nstderr:\n{result.stderr}")
