@@ -62,10 +62,11 @@ Expected:
 Multi-model capability: ✓
 ```
 
-## Examples
+## Examples & tests
 
 - [`examples/quickstart.md`](./examples/quickstart.md) — verify `agent-session` end-to-end after install (real captured outputs)
 - [`examples/sample-debate.md`](./examples/sample-debate.md) — illustrative `/debate` transcript: proposal, challenge, 2 rounds, checkpoint, conclusion
+- [`examples/test-cases.md`](./examples/test-cases.md) — complete acceptance test suite (install init, single-backend smoke, debate end-to-end). Run after install.
 
 ## Maintenance (for the author)
 
