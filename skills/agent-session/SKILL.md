@@ -42,7 +42,7 @@ If a backend is missing, `doctor` reports it; downstream skills (e.g. debate) de
 caller skill (debate, ...)
     │ shell exec
     ▼
-agent_session.py (dispatcher)
+bin/agent-session (dispatcher)
     │
     ├── Backend Registry  ← detect available backends
     │       claude   → drivers/claude.py
@@ -199,7 +199,7 @@ See `references/adding-a-backend.md` for the full driver protocol. TL;DR:
 
 | Component | Purpose |
 |---|---|
-| Python 3.10+ | Run `agent_session.py` |
+| Python 3.10+ | Run `bin/agent-session` (single-file Python script) |
 | At least one backend CLI | What a session actually runs against (claude / oc-task / ...) |
 
 No third-party Python packages — stdlib only.

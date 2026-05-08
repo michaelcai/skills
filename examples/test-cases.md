@@ -35,7 +35,7 @@ which agent-session && agent-session --help | head -3
 **Pass**: prints `/usr/local/bin/agent-session` (or `~/.local/bin/agent-session`) and the usage line.
 
 **Troubleshooting**:
-- `command not found` → either install via plugin (the plugin adds `bin/` to PATH automatically) or `ln -s ~/.michaelcai-skills/skills/agent-session/scripts/agent_session.py ~/.local/bin/agent-session && chmod +x` (and ensure `~/.local/bin` is in your PATH).
+- `command not found` → either install via plugin (the plugin adds `bin/` to PATH automatically) or `ln -s ~/.michaelcai-skills/skills/agent-session/bin/agent-session ~/.local/bin/agent-session` (and ensure `~/.local/bin` is in your PATH).
 
 ### A3. Backend CLIs detected
 

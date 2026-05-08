@@ -5,7 +5,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AS="$SCRIPT_DIR/../scripts/agent_session.py"
+AS="$SCRIPT_DIR/../bin/agent-session"
 TMPDIR_BASE=$(mktemp -d -t agent-session-tests-XXXXXX)
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
 
@@ -86,8 +86,9 @@ echo "=== state utils (via python -c) ==="
 
 python3 - <<PY
 import sys, tempfile
-sys.path.insert(0, "$SCRIPT_DIR/../scripts")
-from agent_session import session_dir, read_meta, write_meta, state_root
+from importlib.machinery import SourceFileLoader
+m = SourceFileLoader("agent_session", "$SCRIPT_DIR/../bin/agent-session").load_module()
+session_dir, read_meta, write_meta, state_root = m.session_dir, m.read_meta, m.write_meta, m.state_root
 from pathlib import Path
 
 # Default state root

@@ -52,7 +52,7 @@ The driver passes `--full-auto` and `--skip-git-repo-check`:
 - `--full-auto` — auto-approves model-issued shell commands (non-interactive)
 - `--skip-git-repo-check` — the per-role cwd is not a git repo by design, so this avoids the warning
 
-If you want stricter sandboxing, modify `_common_flags()` in `agent_session.py` to add `-s read-only` (full-auto + read-only is a common combo for non-mutating roles).
+If you want stricter sandboxing, modify `_common_flags()` in `bin/agent-session` to add `-s read-only` (full-auto + read-only is a common combo for non-mutating roles).
 
 ## Limitations
 

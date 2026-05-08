@@ -4,7 +4,7 @@ To plug a new LLM CLI into agent-session, implement a `Driver` subclass.
 
 ## Steps
 
-1. Add a class to `scripts/agent_session.py` (or, for big drivers, split into `drivers/<name>.py`)
+1. Add a class to `bin/agent-session` (or, for big drivers, split into a separate file alongside)
 2. Register it in the `DRIVERS` list
 3. Add `references/backend-<name>.md` with install steps for users
 4. Add tests in `tests/`

@@ -11,7 +11,7 @@ It is consumed in two ways:
 
 - The actual content shipped to users lives at `skills/<name>/SKILL.md` and `skills/<name>/references/`. Edit there.
 - Each skill has its own `tests/` (bash + Python). Verify with `bash skills/<name>/tests/run-unit.sh`.
-- `skills/agent-session/scripts/agent_session.py` is a Python CLI (no third-party deps; Python 3.10+). It is the runtime backbone for `debate`.
+- `skills/agent-session/bin/agent-session` is a Python CLI (no third-party deps; Python 3.10+). It is the runtime backbone for `debate`.
 - Do **not** introduce hardcoded model names. Model selection is delegated to backend CLIs and overridable via env vars (see `skills/debate/SKILL.md` §2.3.5).
 - All shipped content is in English.
 
@@ -24,7 +24,7 @@ LICENSE
 skills/
 ├── agent-session/                  backend abstraction (claude / opencode / codex / ...)
 │   ├── SKILL.md
-│   ├── scripts/agent_session.py    CLI implementation + drivers
+│   ├── bin/agent-session           CLI implementation + drivers (executable)
 │   ├── references/                 per-backend docs + how to add a backend
 │   └── tests/run-unit.sh
 └── debate/                         multi-model peer debate (depends on agent-session)
