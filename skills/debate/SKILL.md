@@ -10,14 +10,14 @@ When the user challenges the current agent's proposal/opinion, organize a multi-
 
 ## [MUST] Core rules
 
-1. **Multi-model is recommended, not enforced.** The pool is whatever the user configures in `prefs.json`. The skill warns when the pool collapses to a single family (debate degenerates to "talking to yourself"), but the user decides whether to proceed.
+1. **Multi-model is recommended, not enforced.** The pool is whatever the user configures in `prefs.json`. The skill warns when the pool collapses to a single family but lets the user decide.
 2. The main agent is the **moderator**, never a debater. It orchestrates, judges convergence, summarizes, and hands off to the user.
-3. Roles are generated **dynamically** for each debate (no preset role pool). Identity must be specific to the current proposal/challenge.
-4. Sessions **persist across rounds** — each role keeps its own conversation history via [`agent-session`](../agent-session/).
-5. **Every 3 rounds is a checkpoint** — present consensus / divergence / convergence / decision points to the user.
+3. Roles are generated **dynamically** for each debate. Identity must be specific to the current proposal/challenge.
+4. Sessions **persist across rounds** — each role keeps its own conversation history via [`agent-session`](../agent-session/) (read its SKILL.md for CLI semantics; this skill only references the verbs).
+5. **Every 3 rounds is a checkpoint** — present consensus / divergence / decision points to the user.
 6. **Stance tags** (`hold` / `concede` / `add`) are mandatory in every output — used to detect false consensus.
 
-> **About model families.** Each driver carries a static `family` hint (claude→anthropic, codex→openai, opencode→openai by default). This is purely a *heuristic* used to pick the Defender (same family as the main agent) and to spread roles across families when possible. The user is free to ignore the heuristic, override per-role with env vars, or run debate with a single-family pool — none of these are blocked. opencode in particular is multi-provider; treat its `(openai)` tag as a default, not a fact.
+> **About model families.** Each driver carries a static `family` hint (claude→anthropic, codex→openai, opencode→openai by default). It's a heuristic for picking the Defender (same family as the main agent) and spreading roles across families. Override per-role via env vars or prefs. opencode is multi-provider; treat its `(openai)` tag as a default, not a fact.
 
 ## Usage
 
@@ -28,89 +28,40 @@ When the user challenges the current agent's proposal/opinion, organize a multi-
 
 Interactive only. Not auto-invoked by other skills.
 
-## Architecture
-
-```
-debate skill (protocol layer)
-  ├── role planning (Defender + dynamic roles, backend assignment)
-  ├── round orchestration (round 1 parallel, round N+1 incremental TL;DR)
-  ├── stance distribution → false-consensus guard
-  ├── every-3-round checkpoint
-  └── conclusion
-       │
-       ▼ shell calls
-  agent-session (backend abstraction)
-       │
-       ▼ subprocess
-  claude / opencode / codex / ... (user-installed)
-```
-
-debate **does not** know which backend CLI is invoked. It only:
-- declares "I need a role on backend X"
-- spawns / sends / reads via `agent-session` verbs
-- enforces multi-family at the protocol level
-
-## State machine
-
-```
-[preparing]   → context pack + backend preflight + spawn all roles (round 1)
-   │
-   ▼
-[discussing] → main agent orchestrates rounds (max 3 per checkpoint)
-   │ every 3 rounds
-   ▼
-[checkpoint] → main agent summarizes → wait for user
-   │ "continue"             │ "enough"
-   ▼                        ▼
-[discussing]            [concluding] → output conclusion + cleanup all role sessions
-
-Any state → user Ctrl+C → cleanup; existing checkpoint content preserved.
-```
-
 ---
 
 ## Flow
 
-### Step 1: Context Pack (main agent)
+### Step 1: Context Pack
 
-1. Collect the original proposal (the proposal/opinion the agent gave in the current conversation)
-2. Collect the challenge:
-   - User specified → use directly
-   - User did not specify → main agent analyzes weak points and presents to the user for confirmation
-3. Collect project context (tech stack, related code)
-4. Present and confirm with the user:
+Collect (1) the original proposal, (2) the challenge (user-stated or main-agent-inferred-then-confirmed), (3) project context. Show the user a 4-line confirmation block before proceeding:
 
 ```
 This debate:
-- Original proposal: {proposal summary}
-- Challenge: {challenge content}
-- Planned participants: Defender + {role description(s)}
-  (backends will be assigned in step 2 after preflight)
+- Original proposal: {summary}
+- Challenge: {content}
+- Planned roles: Defender + Role A [+ Role B] + Wildcard
+  (backends assigned in step 2)
 
 Begin once confirmed.
 ```
 
-### Step 2: Plan & Spawn
+### Step 2: Plan & spawn
 
-#### 2.1 Generate instance ID + state dir
+#### 2.1 Workspace
 
 ```bash
 DEBATE_ID=$(date +%s%N | md5sum | head -c4)
 DEBATE_DIR="/tmp/debate-${DEBATE_ID}"
 SESSIONS_DIR="${DEBATE_DIR}/sessions"
 mkdir -p "$SESSIONS_DIR"
-export DEBATE_ID DEBATE_DIR SESSIONS_DIR
 ```
 
-`SESSIONS_DIR` is passed to every `agent-session` call as `--state-dir`. All role sessions live under it; cleanup is by `rm -rf`.
+`SESSIONS_DIR` is the `--state-dir` for every `agent-session` call. Cleanup is `rm -rf "$DEBATE_DIR"`.
 
-#### 2.2 Backend preflight (REQUIRED before role planning)
+#### 2.2 Backend preflight
 
-```bash
-agent-session doctor   # show user what's available + multi-model verdict
-```
-
-If `doctor` reports `Multi-model capability: ✗`, **warn** the user but do not abort — the user may genuinely want a single-family debate (e.g. only `claude` available, but they want sonnet vs. opus). Example warning:
+Run `agent-session doctor`. If it reports `Multi-model capability: ✗`, **warn** the user (don't abort):
 
 ```
 Heads up: only one model family detected (anthropic). Debate will run
@@ -118,21 +69,9 @@ single-family — the false-consensus guard via stance tags still works,
 but cross-family disagreement won't surface. Continue? (Y/n)
 ```
 
-Capture the available backend list:
+#### 2.2.5 Load / bootstrap user prefs
 
-```bash
-mapfile -t AVAILABLE_BACKENDS < <(agent-session list-backends)
-```
-
-#### 2.2.5 Load / bootstrap user prefs (`~/.config/agents/debate/prefs.json`)
-
-The skill stores per-user backend defaults at:
-
-```
-~/.config/agents/debate/prefs.json
-```
-
-(XDG-style, vendor-neutral — not tied to Claude.) Schema:
+Path: `~/.config/agents/debate/prefs.json` (XDG, vendor-neutral). Schema:
 
 ```json
 {
@@ -144,119 +83,55 @@ The skill stores per-user backend defaults at:
 }
 ```
 
-`agents` is the **pool** of backends this user wants to draw from. `model: null` means "let the backend pick its own default" (driver doesn't pass `--model`).
+`agents` is the **pool** — backends to draw from, not a fixed role assignment. `model: null` means "let the backend pick its own default".
 
-`agents` is a pool, **not** a fixed role assignment — the main agent decides per-debate which agent plays which role (algorithm in §2.3).
-
-##### First-run bootstrap (file does not exist)
-
-If `prefs.json` is missing, the main agent shows the doctor output and asks the user **which backends to include**. Don't default to "all" silently — make the choice explicit (the pool drives every future debate, so the user should opt-in).
-
-**Hybrid prompt**:
+**First-run bootstrap (file missing).** Show the doctor output and ask the user *which backends to include* — don't default to "all" silently.
 
 | Runtime | Mechanism |
 |---|---|
-| Claude Code (`AskUserQuestion` available) | `AskUserQuestion` with `multiSelect: true`, one option per detected backend (label: `<name>`, description: install path). User picks the subset they want. |
-| Codex CLI / opencode / other | Plain text prompt — list backends with numbers, ask the user to reply with a comma-separated subset (e.g. `1,3`) or `all`. |
+| Claude Code (`AskUserQuestion` available) | `AskUserQuestion` with `multiSelect: true`, one option per detected backend (label = name, description = path). |
+| Codex CLI / opencode / other | Plain text prompt with numbered list; user replies with comma-separated subset (e.g. `1,2`) or `all`. |
 
-**Self-detection rule**: if `AskUserQuestion` is in your tool list, take the first row; otherwise fall back to plain text.
+Don't tag backends with a family in the picker — opencode is multi-provider and `(openai)` is misleading.
 
-Don't tag backends with a family in the picker UI — opencode in particular is multi-provider and labeling it `(openai)` is misleading. Family is an internal heuristic only (see §2.3).
+After the user picks, write the file with the chosen subset, each `model: null`.
 
-Example plain-text fallback:
+**Incremental update (file exists, pool drifted).** Compare prefs.agents vs `agent-session list-backends`:
 
-```
-prefs.json not found — let's set it up.
+- New backend detected, not in prefs → ask "add `<name>` to your debate pool?"
+- Backend in prefs no longer detected → ask "remove `<name>` from pool?"
 
-Detected backends:
-  1. claude     /Users/.../bin/claude
-  2. opencode   /Users/.../bin/opencode
-  3. codex      /opt/.../bin/codex
+Same hybrid prompt rule. The user can also instruct in conversation (*"add codex to my debate pool"*); the agent rewrites the file.
 
-Which to include in your debate pool?
-Reply with a comma-separated subset (e.g. "1,2") or "all".
-```
-
-After the user picks, write `prefs.json` with the chosen subset, each `model: null`. (User can pin a model later by editing the file or by saying *"set claude's default to sonnet"*.)
-
-##### Incremental update (file exists, pool drifted)
-
-On every `/debate`, after `list-backends`, compare prefs.agents vs detected:
-
-- **Detected has new backend not in prefs** → ask: "`<name>` is now installed; add it to your debate pool?"
-- **Prefs has backend that no longer detects** → ask: "`<name>` is no longer detected; remove from pool? (or keep and abort if you ever try to use it)"
-
-Same hybrid rule (`AskUserQuestion` if available — single Y/n per drift item — else plain text). The user can also tell the main agent in-conversation: *"add codex to my debate pool"* / *"set claude's default to sonnet"* — the agent rewrites the file.
-
-After load + sync, the pool must have **≥1 backend**. If the pool has only one family, surface the same soft warning from §2.2 — let the user decide.
+The pool must have ≥1 backend. Single-family pools surface the §2.2 warning.
 
 #### 2.3 Per-role assignment algorithm
 
-Each debate has up to three roles: **Defender**, **Role A**, optionally **Role B**. Each role resolves to one `(backend, model)` pair using this priority chain (highest → lowest):
+Each role resolves to one `(backend, model)` via priority chain (high → low):
 
 ```
-P1. Inline override (this debate only)
-    The user said "this time let codex be defender" in conversation.
-    Main agent honors and skips P2/P3 for that role.
-
-P2. Env var override (this shell session)
-    $DEBATE_<ROLE>_BACKEND  / $DEBATE_<ROLE>_MODEL
-    Useful for one-off experiments without editing prefs.
-
-P3. Main-agent assignment (from the prefs pool)
-    Defender → an agent in the pool whose family matches the
-               main agent's own family (heuristic: the Defender
-               argues on behalf of the original proposal, so
-               same-family is a good first guess). If no same-family
-               agent is in the pool, pick the first entry.
-               (Claude Code  → anthropic; Codex CLI → openai; etc.)
-    Role A   → first agent in the pool whose family ≠ Defender's family,
-               OR if no different-family entry exists, the next pool
-               entry (same family, different agent or model).
-    Role B   → optional, decided by **topic need** — include if the
-               challenge has a second distinct examination angle
-               (e.g. one role audits security, the other audits
-               cost). Do NOT skip just because pool is small; same
-               agent with a different angle is still useful.
-    Wildcard → always present. Free-form divergent thinker — its
-               value comes from NOT being scoped to a specific
-               examination angle. Prefer a cross-family entry
-               for maximum perspective drift; fall back to any
-               pool entry (same family different model also works).
+P1. Inline override ("this debate, let codex be defender") — highest
+P2. $DEBATE_<ROLE>_BACKEND / $DEBATE_<ROLE>_MODEL  (env, this shell)
+P3. Main-agent assignment from the prefs pool:
+    Defender → pool entry whose family matches the main agent's family
+               (Claude Code→anthropic, Codex CLI→openai, etc.)
+               If none match, pick the first entry.
+    Role A   → first cross-family pool entry, OR next pool entry if
+               no cross-family option exists.
+    Role B   → optional, decided by **topic need** — include only if
+               the challenge has a clearly distinct second examination
+               angle from Role A. Same model with a different angle
+               is fine; do NOT skip just because pool is small.
+    Wildcard → always present. Free-form divergent thinker, NOT scoped
+               to a specific examination angle. Prefer cross-family
+               for perspective drift; fall back to any pool entry.
 ```
 
-**Model resolution** (after the agent is fixed):
+**Model resolution** (after agent fixed): env var → prefs[*].model → `null` (omit `--model`).
 
-```
-1. $DEBATE_<ROLE>_MODEL (env var override)
-2. The model field for this agent in prefs (may be null)
-3. null → spawn omits --model; backend picks
-```
-
-Env var reference (used in P2 / model resolution):
-
-| Var | Effect |
-|---|---|
-| `DEBATE_DEFENDER_BACKEND` / `DEBATE_DEFENDER_MODEL` | Override the Defender |
-| `DEBATE_ROLE_A_BACKEND`   / `DEBATE_ROLE_A_MODEL`   | Override Role A |
-| `DEBATE_ROLE_B_BACKEND`   / `DEBATE_ROLE_B_MODEL`   | Override Role B (if used) |
-| `DEBATE_WILDCARD_BACKEND` / `DEBATE_WILDCARD_MODEL` | Override the Wildcard role |
-
-##### Self-family detection (for P3 Defender pick)
-
-The main agent must know its own family. Use this lookup:
-
-| Runtime | Family |
-|---|---|
-| Claude Code | anthropic |
-| Codex CLI | openai |
-| opencode | openai (default; depends on configured provider) |
-| Gemini CLI | google |
-| other | unknown — fallback to first pool entry |
+Env vars: `DEBATE_<ROLE>_BACKEND` / `DEBATE_<ROLE>_MODEL`, where `<ROLE>` ∈ `DEFENDER` / `ROLE_A` / `ROLE_B` / `WILDCARD`.
 
 #### 2.3.1 Print decision and confirm
-
-Before spawning, the main agent **must** print its decision and wait for the user's go-ahead:
 
 ```
 Debate assignment:
@@ -268,259 +143,125 @@ Pool source: ~/.config/agents/debate/prefs.json
 Begin? (Y/n)
 ```
 
-Each role includes a one-line "what it examines" so the user can sanity-check before spending tokens.
+If single-family, prepend: `Note: all roles share family "X" — debate may converge fast.`
 
-If the assignment ended up single-family, append a one-liner above `Begin?`:
+#### 2.3.2 Role identities
 
-```
-Note: all roles share family "anthropic" — debate may converge fast.
-```
+A debate has 3 or 4 roles. The main agent constructs identities — keep them specific to *this* discussion (generic identities like "security expert" are forbidden for the focused critics).
 
-#### 2.3.2 Dynamic role generation
+| Role | Mandatory? | Identity rule |
+|---|---|---|
+| Defender | yes | Defends the original proposal; concedes if it genuinely has flaws. |
+| Role A | yes | Specific examination angle (e.g. "audits the token-refresh replay-attack surface in this JWT proposal"). |
+| Role B | topic-conditional | A *clearly distinct* second angle. Skip if it would just paraphrase Role A. |
+| Wildcard | yes | **Not** scoped to an angle. May raise issues outside the user's stated challenge — that is the value. |
 
-Independent of backend assignment, the main agent constructs role identities. A debate has 3-4 roles total:
+#### 2.4 Prompt files
 
-**Defender (always)** — defends the original proposal. Acknowledges genuine flaws and proposes improvements rather than holding stubbornly.
+Write a **shared context** once at `$DEBATE_DIR/shared-context.md` — Original proposal / Challenge / Project context — and a per-role **first-turn instructions** file. The full first-turn prompt = shared-context + role file (concatenate or pass both).
 
-**Role A (always)** — first focused critic. Identity must be specific (e.g. "audits the token refresh logic for replay attacks in this JWT proposal"). Generic identities ("security expert", "performance engineer") are forbidden.
-
-**Role B (optional, decided by topic)** — second focused critic, included only when the challenge has a clearly distinct second examination angle from Role A. If a second angle would just paraphrase Role A, skip Role B. Same specificity rule applies.
-
-**Wildcard (always)** — free-form divergent role. **Do NOT** scope it to an examination angle. Its job is to bring perspectives the focused critics will likely miss: second-order effects, contrarian framings, analogies from adjacent domains, fundamental questions about premises, "what if the proposal is solving the wrong problem". Wildcard's TL;DR + Argument may legitimately point to issues outside the original challenge — that's the whole point.
-
-**[MUST]** Role A / Role B identities must be specific to this discussion. Wildcard does not need (and should not be given) a narrow examination focus.
-
-If P1 / P2 / P3 produced a single-family assignment (e.g. user pinned all roles to claude), warn the user once at decision-print time but proceed if they confirm. The stance-tag false-consensus guard still works in single-family setups; the user trades cross-family disagreement for whatever motivated their pinning.
-
-#### 2.4 Prepare prompt files
-
-Write a shared context once + a per-role "special instructions" file. Concatenate at spawn time so context is not duplicated in `agent-session`'s state.
-
-**Shared context** (`$DEBATE_DIR/shared-context.md`, written once):
-
-```markdown
-## Original proposal
-{full content of the original proposal}
-
-## Challenge
-{user's challenge content}
-
-## Project context
-{tech stack, summary of relevant code}
-```
-
-**Defender special instructions** (`$DEBATE_DIR/defender-r1.md`):
-
-```markdown
-## Your role
-Defender of the original proposal: justify the proposal, respond to challenges, point out blind spots in the challenge.
-If the original proposal genuinely has flaws, acknowledge them and propose improvements (do not stick stubbornly).
-
-## Focus this round
-(Round 1 = comprehensive response to the challenge; subsequent rounds set by the moderator)
-```
-
-**Dynamic critic role instructions** (`$DEBATE_DIR/role-a-r1.md`, also role-b-r1.md):
-
-```markdown
-## Your role
-{role identity, specific to this discussion}
-
-## Your examination focus
-{examination focus}
-
-## Your stance leaning
-{stance leaning, optional}
-
-## Focus this round
-(Round 1 = full evaluation from your examination focus)
-```
-
-**Wildcard role instructions** (`$DEBATE_DIR/wildcard-r1.md`):
+The Wildcard role file should resemble:
 
 ```markdown
 ## Your role
 Divergent thinker. You are NOT scoped to a specific examination angle.
 
 ## Your job
-Bring perspectives the other roles will miss. Examples (pick what fits — do NOT do all):
-- Question the proposal's premises (is this even the right problem?)
-- Second-order or systemic effects (what does this incentivize / break elsewhere?)
-- Contrarian framings (what argues for the opposite approach?)
-- Analogies from adjacent domains (where has this pattern played out before?)
-- Failure modes nobody asked about (what fails silently? in 2 years? at 10× scale?)
+Bring perspectives the focused critics will miss. Examples (pick what fits — don't do all):
+- Question premises (is this even the right problem?)
+- Second-order or systemic effects
+- Contrarian framings
+- Analogies from adjacent domains
+- Failure modes nobody asked about (silent / 2-year / 10× scale)
 
-You may legitimately raise issues OUTSIDE the user's stated challenge — that is the value of this role. Do not try to be balanced; bring what's not yet on the table.
+You may raise issues OUTSIDE the user's stated challenge — that is this role's value. Don't try to be balanced.
 
 ## Focus this round
-(Round 1 = pick whichever divergent angle gives the most leverage on this proposal.)
+Pick whichever divergent angle gives the most leverage on this proposal.
 ```
 
-**Output format (mandatory, shared by all roles, passed via `--system-prompt`)**:
+Defender / Role A / Role B files follow the obvious shape: `## Your role`, `## Your examination focus`, `## Focus this round`. Compose them yourself.
+
+**Output format (mandatory, passed to every role via `--system-prompt`)**:
 
 ```
 ## TL;DR
-(2-3 sentences with the core view; the moderator only reads this section when summarizing)
+(2-3 sentences with the core view)
 [stance: hold/concede/add]
 
 ## Argument
 (150-300 words, supported by specific code/technical detail)
 ```
 
-**Stance tag semantics** (key signal against false convergence):
+**Stance tag semantics**:
 
 | Tag | Meaning | Moderator interpretation |
-|------|------|----------|
-| `hold` | Responded to counter-argument but maintains original stance | Disagreement remains; continue or switch focus |
-| `concede` | Accepts part of the other side's view, adjusts own stance | Local convergence; can advance |
-| `add` | Brings a new perspective/argument, doesn't directly respond to prior round | Parallel expansion, not a direct dialogue — beware "false consensus" |
+|---|---|---|
+| `hold` | Maintains stance after counter-argument | Disagreement remains |
+| `concede` | Adjusts own stance | Local convergence |
+| `add` | Parallel expansion (no direct response) | Beware false consensus |
 
-[Round 1: every role tags `add` by default; the tag is meaningful only from round 2 onward]
+(Round 1: every role tags `add`; the tag matters from round 2.)
 
-#### 2.5 Concatenate per-role first-turn prompt
+#### 2.5 Spawn roles
 
-For each role, build the full first-turn prompt by concatenating shared context + role instructions:
-
-```bash
-cat "$DEBATE_DIR/shared-context.md" "$DEBATE_DIR/defender-r1.md"  > "$DEBATE_DIR/defender-r1-full.md"
-cat "$DEBATE_DIR/shared-context.md" "$DEBATE_DIR/role-a-r1.md"    > "$DEBATE_DIR/role-a-r1-full.md"
-cat "$DEBATE_DIR/shared-context.md" "$DEBATE_DIR/wildcard-r1.md"  > "$DEBATE_DIR/wildcard-r1-full.md"
-# (and role-b if topic warrants a second focused critic)
-```
-
-#### 2.6 Spawn all roles
-
-The minimum form is **sequential** (no extra dependencies). For parallel execution see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
-
-The main agent has already resolved the (backend, model) for each role in §2.3 and exports them as `<ROLE>_BACKEND` / `<ROLE>_MODEL` (model may be empty → omit `--model`).
+**Use `agent-session` (see ../agent-session/SKILL.md for full CLI).** Spawn each role with the resolved `(backend, model)` and the format rule as `--system-prompt`. Skeleton:
 
 ```bash
-FORMAT_RULE='Reply in English. Required output format: first "## TL;DR" (2-3 sentences with the core view), with a single line "[stance: hold/concede/add]" at the end of the TL;DR (always "add" in round 1), then "## Argument" (150-300 words, citing specific code/technical detail). No preamble.'
-
-# <ROLE>_BACKEND / <ROLE>_MODEL already resolved in §2.3 for: defender, role_a, [role_b], wildcard.
-defender_model_flag=()
-[ -n "${DEFENDER_MODEL:-}" ] && defender_model_flag=(--model "$DEFENDER_MODEL")
-role_a_model_flag=()
-[ -n "${ROLE_A_MODEL:-}" ] && role_a_model_flag=(--model "$ROLE_A_MODEL")
-wildcard_model_flag=()
-[ -n "${WILDCARD_MODEL:-}" ] && wildcard_model_flag=(--model "$WILDCARD_MODEL")
-
 agent-session spawn \
   --backend "$DEFENDER_BACKEND" --role-id defender \
   --prompt-file "$DEBATE_DIR/defender-r1-full.md" \
   --state-dir "$SESSIONS_DIR" \
   --system-prompt "You are the Defender in a technical debate. $FORMAT_RULE" \
-  "${defender_model_flag[@]}"
-
-agent-session spawn \
-  --backend "$ROLE_A_BACKEND" --role-id role-a \
-  --prompt-file "$DEBATE_DIR/role-a-r1-full.md" \
-  --state-dir "$SESSIONS_DIR" \
-  --system-prompt "You are {Role A identity}. $FORMAT_RULE" \
-  "${role_a_model_flag[@]}"
-
-agent-session spawn \
-  --backend "$WILDCARD_BACKEND" --role-id wildcard \
-  --prompt-file "$DEBATE_DIR/wildcard-r1-full.md" \
-  --state-dir "$SESSIONS_DIR" \
-  --system-prompt "You are the Wildcard role — a divergent thinker not bound to a specific examination angle. $FORMAT_RULE" \
-  "${wildcard_model_flag[@]}"
-
-# (and role-b similarly with ROLE_B_BACKEND / ROLE_B_MODEL, only if topic warranted it)
+  ${DEFENDER_MODEL:+--model "$DEFENDER_MODEL"}
+# repeat for role-id role-a, [role-b], wildcard
 ```
 
-After every `spawn` succeeds, the first-round assistant message is at `$SESSIONS_DIR/<role-id>/output/r0.txt`.
+After spawn, round-1 output is at `$SESSIONS_DIR/<role-id>/output/r0.txt`.
 
-### Step 3: Discuss (main agent orchestrates)
+For parallel spawn (saves wall-clock when backends are slow): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
-#### Round 1 — already complete after step 2.6
+### Step 3: Discuss
 
-Main agent reads each role's first-round output:
+#### Round 1
 
-```bash
-agent-session output --role-id defender --state-dir "$SESSIONS_DIR"
-agent-session output --role-id role-a   --state-dir "$SESSIONS_DIR"
-agent-session output --role-id wildcard --state-dir "$SESSIONS_DIR"
-# and role-b if spawned
-```
+Read each role's `r0` output via `agent-session output --role-id <id> --state-dir "$SESSIONS_DIR"`. Record divergence and consensus. Treat the Wildcard's contribution as a *second-axis* signal — it may surface concerns orthogonal to the focused critics; don't force-merge.
 
-Record divergence and consensus points. Treat the Wildcard's contribution as a *second-axis* signal — it may surface concerns orthogonal to Role A/B's examination axes; don't try to force-merge them.
+#### Round N (subsequent)
 
-#### Round N (subsequent rounds)
-
-Build a small incremental prompt for each role — **only** other roles' TL;DR for the previous round + this round's focus. The session already holds prior context, so don't repeat the proposal/challenge.
-
-**Subsequent-round prompt** (`{role}-rN.md`):
+Build an incremental prompt: only other roles' previous-round TL;DRs + this round's focus. The session already holds prior context; do not repeat the proposal/challenge.
 
 ```markdown
 ## Last round, other participants (TL;DR)
-### {role name}
-{2-3 sentence TL;DR}
-
-### {another role name}
-{2-3 sentence TL;DR}
+### {role}: {2-3 sentence TL;DR}
+### {role}: {2-3 sentence TL;DR}
 
 ## Focus this round
-{focus chosen by the moderator}
+{moderator's chosen focus}
 ```
 
-Send sequentially: Role A → Role B (if any) → Wildcard → Defender (Defender speaks last so it can respond to all).
+Send sequentially via `agent-session send`: **Role A → Role B (if any) → Wildcard → Defender** (Defender speaks last so it can respond to all).
 
-```bash
-agent-session send --role-id role-a   --prompt-file "$DEBATE_DIR/role-a-rN.md"   --state-dir "$SESSIONS_DIR"
-# agent-session send --role-id role-b ... if spawned
-agent-session send --role-id wildcard --prompt-file "$DEBATE_DIR/wildcard-rN.md" --state-dir "$SESSIONS_DIR"
-agent-session send --role-id defender --prompt-file "$DEBATE_DIR/defender-rN.md" --state-dir "$SESSIONS_DIR"
-```
+#### Read strategy (token saving)
 
-Read each role's new output:
+[MUST] Prefer reading the TL;DR section over the full Argument. Each session holds full history in agent-session; the moderator never needs to "compress". Read full Argument only at checkpoints, when the user asks, or when the stance distribution flags a problem.
 
-```bash
-agent-session output --role-id role-a --state-dir "$SESSIONS_DIR"     # latest round
-# or specifically:
-agent-session output --role-id role-a --round 2 --state-dir "$SESSIONS_DIR"
-```
+#### [MUST] False-consensus guard
 
-#### Summary & read strategy (token saving)
+Inspect the stance-tag distribution across roles:
 
-**[MUST]** When orchestrating, the main agent prefers reading the TL;DR section and **does not actively read full arguments**:
-
-```bash
-# Extract TL;DR — content between "## TL;DR" and the next "## "
-agent-session output --role-id role-a --state-dir "$SESSIONS_DIR" \
-  | sed -n '/^## TL;DR/,/^## /p' | sed '$d'
-```
-
-| Scenario | Read what |
-|------|-------|
-| Orchestrate next round (build incremental prompt) | TL;DR section only |
-| Decide focus switch / convergence judgment | TL;DR + stance-tag distribution |
-| Every-3-round checkpoint display | TL;DR + selectively read full argument |
-| User asks "expand X's argument" | Read that role's full argument on demand |
-
-Each role's session holds the full history in agent-session — the moderator never needs to "compress" turns; the role's TL;DR is already the compression.
-
-**[MUST] False-consensus guard**: text-similarity alone misjudges "semantically similar but substantively different" stances as consensus. Inspect the stance-tag distribution:
-
-```bash
-# Extract stance tags from this round across all roles
-for r in defender role-a role-b wildcard; do
-  agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" 2>/dev/null
-done | grep -hoE '\[stance: (hold|concede|add)\]'
-```
-
-| Stance distribution | Convergence | Action |
-|---------|-------|------|
-| All `hold` | Low | Disagreement remains; switch focus or continue |
+| Distribution | Convergence | Action |
+|---|---|---|
+| All `hold` | Low | Switch focus or continue |
 | Mostly `concede` | High | Local convergence; advance or end |
-| All `add` | — | Parallel expansion without dialogue — **beware false consensus**; at checkpoint, must read full arguments to verify |
+| All `add` | — | **Parallel without dialogue — beware false consensus**; read full arguments |
 | Mixed | Medium | Decide via TL;DR content |
 
-The stance distribution is a structured signal that doesn't depend on text parsing; TL;DR text similar but stance tags different (e.g. both `hold`) is the strongest false-consensus warning.
+Text similarity is unreliable. Same TL;DR + different stance tags = strongest false-consensus warning.
 
 #### Every-3-round checkpoint
 
-**[MUST]** Pause every 3 rounds and present this to the user:
+[MUST] Pause and present:
 
 ```markdown
 ## Discussion progress (rounds N–N+2)
@@ -529,22 +270,19 @@ The stance distribution is a structured signal that doesn't depend on text parsi
 - {points all parties agreed on}
 
 ### Divergence
-- {view A} vs {view B} — core reason for disagreement: {...}
+- {view A} vs {view B} — core reason: {...}
 
 ### Moderator judgment
 - Convergence level: {High/Medium/Low}
-- Suggestion: {continue along direction X / sufficient to decide}
+- Suggestion: {continue along X / sufficient to decide}
 
 ### You decide
 - {specific decision points}
 ```
 
-Wait for the user's response:
-- "continue" → 3 more rounds; the moderator sets the next focus based on current divergence
-- "switch direction" → adjust the discussion focus
-- "enough" / a decision is made → proceed to Step 4
+User responses: "continue" → 3 more rounds; "switch direction" → adjust focus; "enough" → Step 4.
 
-### Step 4: Conclude (main agent)
+### Step 4: Conclude
 
 ```markdown
 ## Conclusion
@@ -567,54 +305,30 @@ Wait for the user's response:
 
 ### Step 5: Cleanup
 
+[MUST] Runs automatically — don't wait for the user.
+
 ```bash
-# Close every spawned role's session and delete its state
 for role in defender role-a role-b wildcard; do
   agent-session cleanup --role-id "$role" --state-dir "$SESSIONS_DIR" 2>/dev/null || true
 done
-
-# Remove the debate workspace (keeps disk clean; output is already in the conclusion)
 rm -rf "$DEBATE_DIR"
 ```
 
-**[MUST]** Cleanup runs automatically after the debate concludes. Don't wait for the user to ask.
-
-If you used the parallel tmux mode (see `references/parallel-tmux.md`) or the live viewer (`references/visual-cmux-viewer.md`), each has its own additional cleanup step described in those references.
+If you used parallel tmux mode or the live viewer, see those references for additional cleanup.
 
 ---
 
 ## Dependencies
 
-| Component | Required | Purpose |
-|---|---|---|
-| `agent-session` skill | YES | Backend abstraction; install from this same repo |
-| ≥2 backend CLIs from distinct families | YES | E.g. `claude` + `opencode`, or `claude` + `codex`. The protocol enforces ≥2 distinct families |
-| tmux | optional (L2) | Parallel role execution; see [`references/parallel-tmux.md`](./references/parallel-tmux.md) |
-| cmux + uv + Python ≥3.10 | optional (L3) | Live debate viewer (Textual TUI); see [`references/visual-cmux-viewer.md`](./references/visual-cmux-viewer.md) |
-
-## Optional enhancements
-
-The default flow above (sequential spawn + main-agent-prints-checkpoint) is fully functional with just `agent-session` installed.
-
-- **Parallel role execution** — use tmux to run all roles concurrently (saves wall-clock time when calling slow backends): [`references/parallel-tmux.md`](./references/parallel-tmux.md)
-- **Live TUI viewer** — show debate live in a cmux split pane with markdown rendering: [`references/visual-cmux-viewer.md`](./references/visual-cmux-viewer.md)
+- **`agent-session` skill** (hard) — backend abstraction; same repo
+- **≥1 backend CLI** — claude / opencode / codex / gemini / etc; ≥2 distinct families recommended
+- **tmux** (optional) — parallel spawn, see [`references/parallel-tmux.md`](./references/parallel-tmux.md)
+- **cmux + uv + Python ≥3.10** (optional) — live TUI viewer, see [`references/visual-cmux-viewer.md`](./references/visual-cmux-viewer.md)
 
 ## Exception handling
 
 | Situation | Handling |
-|------|------|
-| <2 distinct model families | Abort with install instructions (see step 2.2) |
-| `agent-session spawn` fails | Read stderr; the role is marked `failed` in its `meta.json`. Either retry the role with a different backend, or proceed without it (mark `[failed]` in checkpoint summary) |
-| `agent-session send` fails mid-round | Skip the failed role this round; log; continue with others |
-| Role output is empty | Likely a backend hiccup; retry once via `agent-session send`; if still empty, skip the role this round |
-| User Ctrl+C mid-flow | Run cleanup loop (step 5) in your trap so sessions don't leak |
-| Defender persuaded to abandon original | Normal; record this shift at the next checkpoint |
-
-## Integration
-
-| Skill | Relationship |
-|-------|------|
-| `agent-session` | Hard dependency — backend abstraction. debate is the protocol caller |
-| `cmux` (optional) | Used only by `references/visual-cmux-viewer.md` |
-| upstream | None — `/debate` is user-triggered |
-| downstream | None — conclusion is advisory; user decides next actions |
+|---|---|
+| `agent-session spawn` fails | Read stderr; the role is `failed` in `meta.json`. Retry on a different backend, or proceed without (mark `[failed]` in checkpoint). |
+| `agent-session send` fails mid-round | Skip that role this round; log; continue with the others. |
+| Role output empty | Likely a backend hiccup; retry once via `send`; if still empty, skip this round. |
