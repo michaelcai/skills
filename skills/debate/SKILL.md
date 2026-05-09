@@ -102,6 +102,8 @@ mkdir -p "$SESSIONS_DIR"
 
 `SESSIONS_DIR` is the shared state directory passed to every `spawn` / `send` / `output` / `cleanup` call. Cleanup is `rm -rf "$DEBATE_DIR"`.
 
+The whole `$DEBATE_DIR` (workspace + sessions storage that lives under it) is debate's transient scratch — at debate end, removing it is part of cleanup (see §Step 5).
+
 #### 2.2 Backend preflight
 
 Run `agent-session doctor`. If it reports `Multi-model capability: ✗`, **warn** the user (don't abort):
@@ -254,16 +256,11 @@ Defender / Role A / Role B files follow the obvious shape: `## Your role`, `## Y
 
 #### 2.5 Spawn roles
 
-For each role decided in §2.3, open a persistent session via the [agent-session](../agent-session/SKILL.md) skill's **`spawn`** verb. The verb's call shape is owned by agent-session; what debate provides:
+Debate needs a **persistent multi-turn session per role**, with shared lifetime so cleanup is collective. Use [agent-session](../agent-session/SKILL.md)'s `spawn` verb to create each role's session — debate supplies role identity (defender / role-a / role-b / wildcard), model preference (resolved in §2.3), the role's first-turn input (§2.4), and a system prompt that requires debate's output schema (§2.4 references `references/output-format.md`). Run all spawns in parallel — round-1 prompts are independent, so wall-clock equals the slowest role's latency. Skip `role-b` when §2.3 made it topic-conditional.
 
-- the role's `(backend, model)` from §2.3
-- the role's first-turn prompt from §2.4
-- a system prompt of form `"You are the <role> in a technical debate. $FORMAT_RULE"`
-- a single shared state directory for the whole debate (so cleanup is one `rm -rf`)
+After this step, each role's first-turn reply is observable via agent-session's `output` and `tldr` verbs; the role's full conversation history is owned by agent-session and never re-supplied by debate.
 
-**Run all spawns in parallel** — round-1 prompts are independent, so wall-clock equals the slowest role's latency. Skip `role-b` when §2.3 made it topic-conditional. After spawn, each role's first-turn reply is retrievable via the `output` verb.
-
-For tmux *split-pane visualization* (not for parallelism — concurrency comes from `& ... wait`): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
+For tmux *split-pane visualization* (not parallelism — concurrency comes from `& ... wait`): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
 ### Step 3: Discuss
 
@@ -279,15 +276,19 @@ Build an incremental prompt: only other roles' previous-round TL;DRs + this roun
 
 ##### After-round step (runs immediately after every round finishes)
 
-For each active role, fetch its latest reply via agent-session's `output` verb, pipe it through `sed` to keep only the `## TL;DR ... [stance: ...]` block, and redirect to `$DEBATE_DIR/tldrs/<role-id>.md`. **The moderator never reads the output into its own message** — the pipe goes verb → `sed` → disk.
+For each active role, retrieve the latest-round TL;DR + stance via agent-session's `tldr` verb (returns JSON `{role_id, round_count, tldr_text, stance}`). Cache `tldr_text` to `$DEBATE_DIR/tldrs/<role-id>.md` and `stance` to `$DEBATE_DIR/stances/<role-id>.txt` so the next-round assembly and the false-consensus guard can read them without invoking the verb again. **The moderator never reads these JSON values into its own assistant message** — the verb output goes through `jq` straight to disk:
 
-The extractor is debate-specific (it depends on the §2.4 mandatory output format):
-
+```bash
+mkdir -p "$DEBATE_DIR/tldrs" "$DEBATE_DIR/stances"
+for r in defender role-a role-b wildcard; do
+  agent-session describe --role-id "$r" --state-dir "$SESSIONS_DIR" >/dev/null 2>&1 || continue
+  json=$(agent-session tldr --role-id "$r" --state-dir "$SESSIONS_DIR")
+  echo "$json" | jq -r '.tldr_text // ""' > "$DEBATE_DIR/tldrs/$r.md"
+  echo "$json" | jq -r '.stance    // "null"' > "$DEBATE_DIR/stances/$r.txt"
+done
 ```
-sed -n '/^## TL;DR/,/^## /{/^## [^T]/q;p}'
-```
 
-Each `tldrs/<role>.md` is overwritten each round with the latest TL;DR. These files are inputs to the next round's prompt assembly — not for the moderator to read.
+The output extraction format (i.e. how `## TL;DR` and `[stance: ...]` get parsed) is owned by agent-session — debate only consumes the structured fields. A role with `stance: null` cached here is the canonical signal handled in §False-consensus guard.
 
 ##### Pre-round step (assembling rN.md without reading TL;DRs)
 
@@ -307,7 +308,7 @@ For tmux split panes (visualization, not parallelism — sends already run concu
 
 The main agent has a context window. Each round's full Argument bodies × N rounds × M roles will exhaust it. Three rules:
 
-**(a) Inter-round TL;DRs never enter the moderator's message.** The After-round step pipes the `output` verb's result through `sed` straight to `tldrs/<role>.md`; the Pre-round step `cat`s those files into `rN.md`. The moderator's only inter-round contribution to its own context is the 4-line focus block.
+**(a) Inter-round TL;DRs never enter the moderator's message.** The After-round step calls agent-session's `tldr` verb and pipes the JSON through `jq` straight to `tldrs/<role>.md` and `stances/<role>.txt`; the Pre-round step `cat`s `tldrs/*.md` into `rN.md`. The moderator's only inter-round contribution to its own context is the 4-line focus block.
 
 **(b) Read TL;DRs only at the every-3-round checkpoint.** When you reach a checkpoint, *then* the moderator may `cat $DEBATE_DIR/tldrs/*.md` once to synthesize the consensus/divergence block. Read the full Argument only when the user asks or when the stance distribution warrants verification.
 
@@ -315,7 +316,7 @@ The main agent has a context window. Each round's full Argument bodies × N roun
 
 #### [MUST] False-consensus guard
 
-Inspect the stance-tag distribution across roles:
+After the After-round step has cached each role's stance, inspect the distribution. **Roles with `stance: null` are a separate signal** — they indicate output-format drift (the role's reply did not match `references/output-format.md`), not a stance position. Investigate before trusting the round's data.
 
 | Distribution | Convergence | Action |
 |---|---|---|
@@ -323,8 +324,9 @@ Inspect the stance-tag distribution across roles:
 | Mostly `concede` | High | Local convergence; advance or end |
 | All `add` | — | **Parallel without dialogue — beware false consensus**; read full arguments |
 | Mixed | Medium | Decide via TL;DR content |
+| **≥1 `null` stance** | **Format drift** | **Re-spawn affected role or fix `references/output-format.md` before continuing — do not interpret this round's stance distribution as meaningful** |
 
-Text similarity is unreliable. Same TL;DR + different stance tags = strongest false-consensus warning.
+Text similarity is unreliable. Same TL;DR + different stance tags = strongest false-consensus warning. A `null` stance amid otherwise-valid stances does **not** count as "Mostly X" — it must be resolved first.
 
 #### Every-3-round checkpoint
 
@@ -393,7 +395,7 @@ This means the moderator's context grows by one ~15-line summary per checkpoint,
 
 [MUST] Runs automatically — don't wait for the user.
 
-For every role spawned in §2.5, terminate its session via agent-session's `cleanup` verb. Then `rm -rf "$DEBATE_DIR"`. Cleanup must be idempotent (calling it twice is a no-op) — ignore "session not found" errors.
+Debate ends by terminating every role session it created (use agent-session's `cleanup` verb per role) and removing its own scratch workspace (`$DEBATE_DIR` from §2.1). Cleanup must be idempotent — repeating it is a no-op; ignore "session not found" errors.
 
 For tmux split mode see [`references/parallel-tmux.md`](./references/parallel-tmux.md) for its analogous cleanup.
 
