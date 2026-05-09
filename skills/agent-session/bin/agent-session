@@ -78,7 +78,38 @@ def lock(role_id: str, state_dir: Optional[str]):
 
 class Driver(ABC):
     name: str
-    family: str  # anthropic | openai | google | local | unknown
+    binary_family: str  # anthropic | openai | google | local | unknown — supply-chain identity (which CLI binary)
+
+    # default model→family lookup table used by model_family() unless a driver overrides
+    MODEL_FAMILY_PREFIXES: dict[str, str] = {
+        "anthropic": "anthropic",
+        "claude": "anthropic",
+        "openai": "openai",
+        "gpt": "openai",
+        "google": "google",
+        "gemini": "google",
+        "models/gemini": "google",
+        "xai": "xai",
+        "grok": "xai",
+    }
+
+    @classmethod
+    def model_family(cls, model: Optional[str]) -> str:
+        """Resolve request-routing family from a model string.
+
+        Falls back to cls.binary_family when the model is null or its prefix
+        is unrecognized — *never* returns "unknown" for a recognized backend's
+        default model (that would silently break debate's cross-family logic).
+        """
+        if not model:
+            return cls.binary_family
+        # Try slash-namespaced first ("anthropic/claude-opus" → "anthropic")
+        prefix = model.split("/", 1)[0]
+        if prefix in cls.MODEL_FAMILY_PREFIXES:
+            return cls.MODEL_FAMILY_PREFIXES[prefix]
+        # Try first dash-segment ("claude-3-opus" → "claude" → "anthropic", "gpt-4" → "gpt" → "openai")
+        head = model.split("-", 1)[0].split("/")[-1].lower()
+        return cls.MODEL_FAMILY_PREFIXES.get(head, cls.binary_family)
 
     @classmethod
     @abstractmethod
@@ -118,7 +149,7 @@ class Driver(ABC):
 
 class ClaudeDriver(Driver):
     name = "claude"
-    family = "anthropic"
+    binary_family = "anthropic"
 
     @classmethod
     def detect(cls) -> Optional[str]:
@@ -142,7 +173,6 @@ class ClaudeDriver(Driver):
 
         meta = {
             "backend": "claude",
-            "family": "anthropic",
             "model": model or "default",
             "sid": sid,
             "round_count": 0,
@@ -231,7 +261,9 @@ class ClaudeDriver(Driver):
 
 class OpencodeDriver(Driver):
     name = "opencode"
-    family = "openai"  # default family tag; opencode is multi-provider but most users run GPT
+    # binary_family = "openai" is a fallback; opencode is multi-provider, so the actual
+    # request-routing family is computed per spawn from the chosen --model via Driver.model_family().
+    binary_family = "openai"
 
     @classmethod
     def detect(cls) -> Optional[str]:
@@ -243,9 +275,28 @@ class OpencodeDriver(Driver):
             raise RuntimeError("opencode not found; install opencode (https://opencode.ai/docs/install)")
         return path
 
+    # Substrings that indicate the configured opencode model is unavailable
+    # for the current auth — surfaces with an actionable hint instead of leaking
+    # raw API error text.
+    _MODEL_AUTH_HINTS: tuple[str, ...] = (
+        "is not supported when using",
+        "ProviderModelNotFoundError",
+        "Model not found",
+        "401",
+        "unauthorized",
+    )
+
     @staticmethod
     def _parse_run_output(stdout: str) -> tuple[Optional[str], str]:
-        """Parse `opencode run --format json` NDJSON. Returns (sessionID, assistant_text)."""
+        """Parse `opencode run --format json` NDJSON. Returns (sessionID, assistant_text).
+
+        Raises RuntimeError on:
+        - explicit `type:"error"` events (with a `--model` hint when the failure
+          looks like a model-availability/auth problem)
+        - empty assistant text (no `type:"text"` events with non-empty `part.text`)
+          — typically means the agent entered a tool-loop, hit a quota, or got
+          silently rejected; sid may be set but state is not "active".
+        """
         sid: Optional[str] = None
         chunks: list[str] = []
         for line in stdout.splitlines():
@@ -266,7 +317,22 @@ class OpencodeDriver(Driver):
             elif ev.get("type") == "error":
                 err = ev.get("error") or {}
                 msg = (err.get("data") or {}).get("message") or err.get("name") or "unknown error"
+                # Model-availability / auth issue → suggest --model override.
+                if any(h.lower() in msg.lower() for h in OpencodeDriver._MODEL_AUTH_HINTS):
+                    raise RuntimeError(
+                        f"opencode model rejected: {msg}\n"
+                        "  Hint: opencode's default model is not usable with this auth. "
+                        "Retry with `--model <provider>/<model>` (e.g. `openai/gpt-5.4-mini`), "
+                        "or set `model` for this backend in ~/.config/agents/debate/prefs.json."
+                    )
                 raise RuntimeError(f"opencode run error: {msg}")
+        if not chunks:
+            raise RuntimeError(
+                "opencode produced no assistant text — likely tool-loop, quota, or silent "
+                "rejection (rc=0 but no text events). "
+                "Check `opencode auth list` and the configured agent; consider `--model <model>` "
+                "to bypass the default."
+            )
         return sid, "".join(chunks)
 
     def _run(self, role_id, state_dir, prompt_text, *, session: Optional[str], model: Optional[str]):
@@ -297,7 +363,6 @@ class OpencodeDriver(Driver):
 
         meta = {
             "backend": "opencode",
-            "family": "openai",
             "model": model or "default",
             "sid": None,
             "round_count": 0,
@@ -306,7 +371,12 @@ class OpencodeDriver(Driver):
         }
         write_meta(role_id, state_dir, meta)
 
-        sid, text = self._run(role_id, state_dir, prompt_content, session=None, model=model)
+        try:
+            sid, text = self._run(role_id, state_dir, prompt_content, session=None, model=model)
+        except RuntimeError:
+            meta["state"] = "failed"
+            write_meta(role_id, state_dir, meta)
+            raise
         if not sid:
             meta["state"] = "failed"
             write_meta(role_id, state_dir, meta)
@@ -375,7 +445,7 @@ class OpencodeDriver(Driver):
 
 class CodexDriver(Driver):
     name = "codex"
-    family = "openai"
+    binary_family = "openai"
 
     @classmethod
     def detect(cls) -> Optional[str]:
@@ -411,7 +481,6 @@ class CodexDriver(Driver):
 
         meta = {
             "backend": "codex",
-            "family": "openai",
             "model": model or "default",
             "sid": None,  # not needed — cwd-scoped --last finds it
             "round_count": 0,
@@ -529,21 +598,92 @@ def get_driver_for_session(role_id: str, state_dir: Optional[str]) -> Optional[D
 # ============================================================
 
 
+def _probe_auth(driver_name: str) -> tuple[Optional[bool], Optional[str]]:
+    """Lightweight auth check per backend. Returns (ok, identity).
+
+    `ok` is None when we can't tell (no probe wired up); True/False otherwise.
+    `identity` is a free-form string like "anthropic-api" / "openai-chatgpt" /
+    "openai-api" used by debate's pool-collapse warning to spot collisions where
+    distinct binaries share an upstream provider/account.
+    """
+    try:
+        if driver_name == "claude":
+            # File-based on Linux / older versions
+            cred = Path.home() / ".claude" / ".credentials.json"
+            if cred.exists():
+                return True, "anthropic-api"
+            # Modern Claude Code on macOS stores creds in the OS Keychain — there's no
+            # file to stat, so we fall back to inferring auth from prior usage:
+            projects = Path.home() / ".claude" / "projects"
+            if projects.exists() and any(projects.iterdir()):
+                return True, "anthropic-api"
+            return None, None  # genuinely uncertain — don't claim "missing"
+        if driver_name == "opencode":
+            r = subprocess.run(
+                ["opencode", "auth", "list"], capture_output=True, text=True, timeout=10
+            )
+            if r.returncode != 0 or not r.stdout.strip():
+                return False, None
+            text = r.stdout.lower()
+            if "oauth" in text or "chatgpt" in text:
+                return True, "openai-chatgpt"
+            if "anthropic" in text:
+                return True, "anthropic-api"
+            if "openai" in text:
+                return True, "openai-api"
+            return True, "opencode-other"
+        if driver_name == "codex":
+            auth = Path.home() / ".codex" / "auth.json"
+            if not auth.exists():
+                return False, None
+            try:
+                data = json.loads(auth.read_text())
+            except Exception:
+                return True, "openai-api"
+            mode = (data.get("mode") or data.get("auth_mode") or "").lower()
+            if "chatgpt" in mode or "oauth" in mode:
+                return True, "openai-chatgpt"
+            return True, "openai-api"
+    except Exception:
+        return None, None
+    return None, None
+
+
 def cmd_doctor(args) -> int:
     print("Detected backends:")
     available: list[type[Driver]] = []
+    auth_identities: list[str] = []
     for d in DRIVERS:
         path = d.detect()
-        if path:
-            available.append(d)
-            print(f"  ✓ {d.name:<10} {path}")
-        else:
+        if not path:
             print(f"  ✗ {d.name:<10} not installed  — see references/backend-{d.name}.md")
-    families = {d.family for d in available}
+            continue
+        available.append(d)
+        ok, identity = _probe_auth(d.name)
+        if ok is True:
+            auth_label = f"auth={identity}"
+            auth_identities.append(identity)
+        elif ok is False:
+            auth_label = "auth=missing — run login"
+        else:
+            auth_label = "auth=?"
+        print(f"  ✓ {d.name:<10} {path:<40}  family={d.binary_family:<10} {auth_label}")
+    binary_families = {d.binary_family for d in available}
     print()
     print(f"Available backends: {len(available)}")
-    print(f"Distinct model families: {len(families)}" + (f" ({', '.join(sorted(families))})" if families else ""))
-    if len(families) >= 2:
+    print(
+        f"Distinct binary families: {len(binary_families)}"
+        + (f" ({', '.join(sorted(binary_families))})" if binary_families else "")
+    )
+    distinct_auths = set(auth_identities)
+    if len(distinct_auths) >= 2:
+        print(f"Distinct auth identities: {len(distinct_auths)} ({', '.join(sorted(distinct_auths))})")
+    elif distinct_auths:
+        print(
+            f"Auth-identity collision: all detected backends share '{next(iter(distinct_auths))}' — "
+            "cross-family is notional, not actual"
+        )
+    if len(binary_families) >= 2:
         print("Multi-model capability: ✓")
     else:
         print("Multi-model capability: ✗ (need ≥2 distinct families for cross-model debate)")
@@ -562,10 +702,18 @@ def cmd_describe(args) -> int:
     if not meta:
         print(f"session not found: {args.role_id}", file=sys.stderr)
         return 2
+    backend = meta.get("backend")
+    cls = get_driver_for_backend(backend) if backend else None
+    model = meta.get("model")
+    if model == "default":
+        model = None
+    binary_family = cls.binary_family if cls else None
+    model_family = cls.model_family(model) if cls else None
     out = {
         "role_id": args.role_id,
-        "backend": meta.get("backend"),
-        "family": meta.get("family"),
+        "backend": backend,
+        "binary_family": binary_family,
+        "model_family": model_family,
         "model": meta.get("model"),
         "round_count": meta.get("round_count", 0),
         "state": meta.get("state"),
@@ -616,7 +764,9 @@ def cmd_status(args) -> int:
     if not drv:
         print("error")
         return 0
-    print(drv.status(args.role_id, args.state_dir, args.wait, args.timeout))
+    # All current drivers are synchronous (spawn/send block until done), so status
+    # is a pure read of meta.json — no wait/timeout polling.
+    print(drv.status(args.role_id, args.state_dir, False, None))
     return 0
 
 
@@ -675,11 +825,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--prompt-file", required=True)
     p_send.add_argument("--state-dir")
 
-    p_status = sub.add_parser("status", help="get session status")
+    p_status = sub.add_parser(
+        "status",
+        help="read session state (always synchronous; spawn/send block until done)",
+    )
     p_status.add_argument("--role-id", required=True)
     p_status.add_argument("--state-dir")
-    p_status.add_argument("--wait", action="store_true")
-    p_status.add_argument("--timeout", type=int)
 
     p_output = sub.add_parser("output", help="read assistant message")
     p_output.add_argument("--role-id", required=True)

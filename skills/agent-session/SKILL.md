@@ -25,7 +25,7 @@ agent-session list-backends                                         # programmat
 agent-session describe   --role-id R                                # what backend/model is this role using
 agent-session spawn      --backend X --role-id R --prompt-file P [--model M] [--state-dir D] [--system-prompt S]
 agent-session send       --role-id R --prompt-file P [--state-dir D]
-agent-session status     --role-id R [--wait] [--timeout N] [--state-dir D]
+agent-session status     --role-id R [--state-dir D]
 agent-session output     --role-id R [--round N] [--state-dir D]
 agent-session cleanup    --role-id R [--state-dir D]
 ```
@@ -74,7 +74,7 @@ The caller holds only `role-id`. Backend-specific session ids (`SID`) live in `m
     ▼
 [active]
     ↻ send --role-id R --prompt-file rN.md → driver.send() → output/rN.txt, round_count++
-    ↻ status --role-id R [--wait]          → running | done | error
+    ↻ status --role-id R                    → running | done | error
     ↻ output --role-id R [--round N]       → reads output/rN.txt
     │
     │ cleanup --role-id R
@@ -146,10 +146,10 @@ stdout: nothing on success; caller reads via `output --round N`.
 ### `status`
 
 ```
-agent-session status --role-id role-a [--wait] [--timeout 600]
+agent-session status --role-id role-a
 ```
 
-stdout: `running` | `done` | `error` (one line). With `--wait`, blocks until non-running or timeout.
+stdout: `running` | `done` | `error` (one line). All current drivers are synchronous — `spawn`/`send` block until the turn is complete — so `status` is a pure read of `meta.json`, never a polling primitive.
 
 ### `output`
 
@@ -170,11 +170,18 @@ Closes the backend session and deletes the state directory. Idempotent.
 agent-session describe --role-id role-a
 ```
 
-stdout: JSON `{"backend": "opencode", "model": "default", "family": "openai", "round_count": 4, "state": "active"}`.
+stdout: JSON like `{"backend": "opencode", "binary_family": "openai", "model_family": "anthropic", "model": "anthropic/claude-opus", "round_count": 4, "state": "active"}`.
 
 `model` is `"default"` when caller did not pass `--model` to `spawn` (in which case the backend uses its own configured default). Otherwise it's the literal model name the caller requested.
 
-`family` is a coarse classifier (`anthropic` / `openai` / `google` / `local` / `unknown`) that callers like `debate` use to judge "≥2 distinct families" multi-model requirements.
+There are **two** family classifiers — they answer different questions, and a caller asking the wrong one gets misleading answers:
+
+- **`binary_family`** (static per driver: `claude→anthropic`, `codex→openai`, `opencode→openai` default) — *which CLI binary, which credentials, which network egress are we trusting?* This is supply-chain identity. Network policies that route by binary use this.
+- **`model_family`** (per-model resolver) — *which provider actually served the response?* For `opencode -m anthropic/claude-opus` this is `"anthropic"`, even though `binary_family` is `"openai"`. Cross-family debate-role assignment uses this.
+
+Both fall back to `binary_family` when the model is unknown — never to `"unknown"` (that would silently break "≥2 distinct families" logic for any default model without a slash prefix).
+
+`doctor` additionally probes **auth identity** per backend (`anthropic-api` / `openai-chatgpt` / `openai-api` / ...) — two backends with distinct binaries can still share an upstream account, in which case "cross-family" is notional, not actual. The doctor warning surfaces this collision.
 
 ## Caller conventions (for skills using agent-session)
 
