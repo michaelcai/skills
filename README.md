@@ -20,12 +20,36 @@ Agent skills collection.
 
 Skills are then invoked with the namespace prefix: `/michaelcai-skills:debate`.
 
+**Post-install (one-time, required).** `debate` shells out to the `agent-session` binary, which the Claude Code marketplace doesn't auto-expose on `PATH`. Symlink it:
+
+```bash
+ln -sf "$HOME/.claude/plugins/marketplaces/michaelcai-skills/plugins/michaelcai-skills/skills/agent-session/bin/agent-session" \
+  /usr/local/bin/agent-session
+```
+
+(Adjust the source path if your Claude Code stores plugins elsewhere — `find ~/.claude -name 'agent-session' -path '*/bin/*' 2>/dev/null` finds it.)
+
+`/usr/local/bin` is preferred over `~/.local/bin` because **macOS GUI Claude Code launches via launchd, which does NOT inherit your shell's `PATH`** — `~/.local/bin` may resolve in your terminal but not from Claude Code's `Bash` tool. `/usr/local/bin` is on the launchd default path. Verify:
+
+```bash
+agent-session doctor
+```
+
 ### Option 2 — Any SKILL.md-compatible agent (Codex / Cursor / Gemini CLI / OpenCode etc.)
 
 ```bash
 git clone https://github.com/michaelcai/skills.git ~/.michaelcai-skills
 ln -s ~/.michaelcai-skills/skills/debate         ~/.claude/skills/debate
 ln -s ~/.michaelcai-skills/skills/agent-session  ~/.claude/skills/agent-session
+sudo ln -s ~/.michaelcai-skills/skills/agent-session/bin/agent-session /usr/local/bin/agent-session
+```
+
+The third symlink puts the binary on `PATH` for both your terminal and (on macOS) the GUI Claude Code app. If you can't `sudo`, use `~/.local/bin` instead and add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc — but be aware that **macOS GUI apps launched via launchd ignore your shell rc**; the symlink will resolve in your terminal but not from Claude Code's Bash tool. Alternative: `launchctl setenv PATH "$HOME/.local/bin:$PATH"` once.
+
+Verify:
+
+```bash
+agent-session doctor
 ```
 
 To update:
