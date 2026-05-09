@@ -382,13 +382,25 @@ User responses: "continue" → 3 more rounds; "switch direction" → adjust focu
 [MUST] Runs automatically — don't wait for the user.
 
 ```bash
+# 1. Close every spawned role's session
 for role in defender role-a role-b wildcard; do
   agent-session cleanup --role-id "$role" --state-dir "$SESSIONS_DIR" 2>/dev/null || true
 done
+
+# 2. Close the live viewer pane if Step 1.5 spawned one
+if [ -f "$DEBATE_DIR/viewer.env" ]; then
+  source "$DEBATE_DIR/viewer.env"
+  [ -n "${VIEWER_SURFACE:-}" ] && cmux close-surface --surface "$VIEWER_SURFACE" 2>/dev/null || true
+  pkill -f "debate-viewer.py.*$SESSIONS_DIR" 2>/dev/null || true
+fi
+
+# 3. Wipe the debate workspace
 rm -rf "$DEBATE_DIR"
 ```
 
-If you used parallel tmux mode or the live viewer, see those references for additional cleanup.
+[MUST] If §1.5 wrote `$DEBATE_DIR/viewer.env` (i.e. `view: cmux` was active and the cmux pane was opened), you **must** close that pane in cleanup — leaving an orphan pane is silent state pollution. The viewer process pkill is belt-and-suspenders for the case where `cmux close-surface` succeeds but the python child wasn't a child of cmux's pty.
+
+For tmux split mode see [`references/parallel-tmux.md`](./references/parallel-tmux.md) for its analogous cleanup.
 
 ---
 
