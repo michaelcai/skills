@@ -205,7 +205,7 @@ echo "exit code: $?"   # expected: 0
 
 `debate` is a user-invocable skill. The main agent (your Claude Code session) reads `skills/debate/SKILL.md` and orchestrates. These tests verify the full skill flow rather than the CLI plumbing.
 
-### C1. Backend preflight rejects single-family setups
+### C1. Backend preflight warns (not aborts) on single-family setups
 
 **Setup** (simulate "only claude installed"):
 
@@ -216,12 +216,14 @@ sudo mv $(which codex)    /tmp/codex.hidden    2>/dev/null
 agent-session doctor
 ```
 
-**Pass**: `Multi-model capability: ✗`.
+**Pass**: `Multi-model capability: ✗` (informational — `agent-session doctor` still exits 0).
 
 Now from a Claude Code session, ask: `/debate "test"`.
 
-**Pass**: The main agent (following SKILL.md §2.2) refuses to start, reports something like:
-> Cannot start debate: fewer than 2 distinct model families detected. Install at least one non-Claude backend (opencode, codex, gemini).
+**Pass**: The main agent (per SKILL.md §2.2) **warns** the user about single-family with a Y/n prompt, e.g.:
+> Heads up: only one model family detected (anthropic). Debate will run single-family — the false-consensus guard via stance tags still works, but cross-family disagreement won't surface. Continue? (Y/n)
+
+If the user replies "Y", debate proceeds with whatever's in the pool. The skill must **not** hard-abort.
 
 **Cleanup**:
 
@@ -293,11 +295,13 @@ mv ~/.config/agents/debate/prefs.json /tmp/prefs.bak 2>/dev/null
 In a Claude Code session: `/debate "test"`.
 
 **Pass**:
-1. Main agent prints `prefs.json not found — let's set it up.`
+1. Main agent reports `prefs.json not found — let's set it up.`
 2. Lists detected backends + families (matches `agent-session doctor`).
-3. Asks for confirmation in **plain text** (not via `AskUserQuestion`).
-4. After "Y", file `~/.config/agents/debate/prefs.json` exists with `version: 1`, `agents` array containing all detected backends, each with `model: null`.
-5. Debate proceeds.
+3. **Hybrid prompt rule**:
+   - Claude Code (has `AskUserQuestion`) → main agent uses `AskUserQuestion` multi-select with one option per detected backend. **Does not** default-select all.
+   - Codex CLI / opencode / other → main agent prints a numbered list and asks for a comma-separated subset (e.g. `1,2`) or `all`.
+4. After the user picks, file `~/.config/agents/debate/prefs.json` exists with `version: 1` and only the chosen backends, each `model: null`.
+5. Debate proceeds (or stops here if you only want to verify bootstrap).
 
 **Verify**:
 

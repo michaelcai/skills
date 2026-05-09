@@ -10,12 +10,14 @@ When the user challenges the current agent's proposal/opinion, organize a multi-
 
 ## [MUST] Core rules
 
-1. **Multi-model is mandatory** — at least 2 distinct model families across roles (e.g. anthropic + openai). Single-family "multi-role" is rejected.
+1. **Multi-model is recommended, not enforced.** The pool is whatever the user configures in `prefs.json`. The skill warns when the pool collapses to a single family (debate degenerates to "talking to yourself"), but the user decides whether to proceed.
 2. The main agent is the **moderator**, never a debater. It orchestrates, judges convergence, summarizes, and hands off to the user.
 3. Roles are generated **dynamically** for each debate (no preset role pool). Identity must be specific to the current proposal/challenge.
 4. Sessions **persist across rounds** — each role keeps its own conversation history via [`agent-session`](../agent-session/).
 5. **Every 3 rounds is a checkpoint** — present consensus / divergence / convergence / decision points to the user.
 6. **Stance tags** (`hold` / `concede` / `add`) are mandatory in every output — used to detect false consensus.
+
+> **About model families.** Each driver carries a static `family` hint (claude→anthropic, codex→openai, opencode→openai by default). This is purely a *heuristic* used to pick the Defender (same family as the main agent) and to spread roles across families when possible. The user is free to ignore the heuristic, override per-role with env vars, or run debate with a single-family pool — none of these are blocked. opencode in particular is multi-provider; treat its `(openai)` tag as a default, not a fact.
 
 ## Usage
 
@@ -108,15 +110,15 @@ export DEBATE_ID DEBATE_DIR SESSIONS_DIR
 agent-session doctor   # show user what's available + multi-model verdict
 ```
 
-If `doctor` reports `Multi-model capability: ✗`, abort with this message:
+If `doctor` reports `Multi-model capability: ✗`, **warn** the user but do not abort — the user may genuinely want a single-family debate (e.g. only `claude` available, but they want sonnet vs. opus). Example warning:
 
 ```
-Cannot start debate: fewer than 2 distinct model families detected.
-Install at least one non-Claude backend (opencode, codex, gemini).
-See agent-session/references/backend-*.md for install steps.
+Heads up: only one model family detected (anthropic). Debate will run
+single-family — the false-consensus guard via stance tags still works,
+but cross-family disagreement won't surface. Continue? (Y/n)
 ```
 
-Otherwise capture the available backend list:
+Capture the available backend list:
 
 ```bash
 mapfile -t AVAILABLE_BACKENDS < <(agent-session list-backends)
@@ -148,23 +150,34 @@ The skill stores per-user backend defaults at:
 
 ##### First-run bootstrap (file does not exist)
 
-If `prefs.json` is missing, the main agent runs the doctor output and asks the user — **plain text, not `AskUserQuestion`** (so this works across Claude Code, Codex CLI, opencode, etc.). Example dialogue:
+If `prefs.json` is missing, the main agent shows the doctor output and asks the user **which backends to include**. Don't default to "all" silently — make the choice explicit (the pool drives every future debate, so the user should opt-in).
+
+**Hybrid prompt**:
+
+| Runtime | Mechanism |
+|---|---|
+| Claude Code (`AskUserQuestion` available) | `AskUserQuestion` with `multiSelect: true`, one option per detected backend (label: `<name>`, description: install path). User picks the subset they want. |
+| Codex CLI / opencode / other | Plain text prompt — list backends with numbers, ask the user to reply with a comma-separated subset (e.g. `1,3`) or `all`. |
+
+**Self-detection rule**: if `AskUserQuestion` is in your tool list, take the first row; otherwise fall back to plain text.
+
+Don't tag backends with a family in the picker UI — opencode in particular is multi-provider and labeling it `(openai)` is misleading. Family is an internal heuristic only (see §2.3).
+
+Example plain-text fallback:
 
 ```
 prefs.json not found — let's set it up.
 
 Detected backends:
-  ✓ claude     (anthropic)
-  ✓ opencode   (openai)
-  ✓ codex      (openai)
+  1. claude     /Users/.../bin/claude
+  2. opencode   /Users/.../bin/opencode
+  3. codex      /opt/.../bin/codex
 
-Default proposal: include all 3 in your pool, each using its backend's
-default model. You can edit ~/.config/agents/debate/prefs.json later.
-
-OK to write this? (Y/n/edit)
+Which to include in your debate pool?
+Reply with a comma-separated subset (e.g. "1,2") or "all".
 ```
 
-On "Y" the agent writes the file with all detected backends and `model: null` for each. On "edit" the agent walks through customizing one entry at a time.
+After the user picks, write `prefs.json` with the chosen subset, each `model: null`. (User can pin a model later by editing the file or by saying *"set claude's default to sonnet"*.)
 
 ##### Incremental update (file exists, pool drifted)
 
@@ -173,9 +186,9 @@ On every `/debate`, after `list-backends`, compare prefs.agents vs detected:
 - **Detected has new backend not in prefs** → ask: "`<name>` is now installed; add it to your debate pool?"
 - **Prefs has backend that no longer detects** → ask: "`<name>` is no longer detected; remove from pool? (or keep and abort if you ever try to use it)"
 
-Same plain-text prompts. The user can also tell the main agent in-conversation: *"add codex to my debate pool"* / *"set claude's default to sonnet"* — the agent rewrites the file.
+Same hybrid rule (`AskUserQuestion` if available — single Y/n per drift item — else plain text). The user can also tell the main agent in-conversation: *"add codex to my debate pool"* / *"set claude's default to sonnet"* — the agent rewrites the file.
 
-After load + sync, validate **≥2 distinct families in the pool**, abort otherwise (same fail-fast as §2.2).
+After load + sync, the pool must have **≥1 backend**. If the pool has only one family, surface the same soft warning from §2.2 — let the user decide.
 
 #### 2.3 Per-role assignment algorithm
 
@@ -192,17 +205,17 @@ P2. Env var override (this shell session)
 
 P3. Main-agent assignment (from the prefs pool)
     Defender → an agent in the pool whose family matches the
-               main agent's own family. Rationale: the Defender
-               argues on behalf of the original proposal, so it
-               should belong to the same family that produced it.
+               main agent's own family (heuristic: the Defender
+               argues on behalf of the original proposal, so
+               same-family is a good first guess). If no same-family
+               agent is in the pool, pick the first entry.
                (Claude Code  → anthropic; Codex CLI → openai; etc.)
-               If no same-family agent is in the pool, pick the
-               first pool entry as a fallback.
-    Role A   → first agent in the pool whose family ≠ Defender's family.
+    Role A   → first agent in the pool whose family ≠ Defender's family,
+               OR if no different-family entry exists, the next pool
+               entry (same family, different agent or model).
     Role B   → main agent's call: typically the next pool entry not
-               already assigned (same family as Defender with a different
-               model also acceptable, as long as the cross-family rule
-               via Role A is preserved).
+               already assigned. May be skipped if pool has only 2 entries
+               and a 2-role debate suffices.
 ```
 
 **Model resolution** (after the agent is fixed):
@@ -246,6 +259,12 @@ Pool source: ~/.config/agents/debate/prefs.json
 Begin? (Y/n)
 ```
 
+If the assignment ended up single-family, append a one-liner above `Begin?`:
+
+```
+Note: all roles share family "anthropic" — debate may converge fast.
+```
+
 #### 2.3.2 Dynamic role generation
 
 Independent of backend assignment, the main agent constructs role identities:
@@ -259,7 +278,7 @@ Independent of backend assignment, the main agent constructs role identities:
 
 **[MUST]** Role descriptions must be specific to this discussion. Generic descriptions like "security expert" or "performance engineer" are forbidden.
 
-If P1 / P2 / P3 produced an assignment that violates the ≥2-family rule (e.g. user pinned all roles to the same family via env vars), abort with a clear error before spawning.
+If P1 / P2 / P3 produced a single-family assignment (e.g. user pinned all roles to claude), warn the user once at decision-print time but proceed if they confirm. The stance-tag false-consensus guard still works in single-family setups; the user trades cross-family disagreement for whatever motivated their pinning.
 
 #### 2.4 Prepare prompt files
 
