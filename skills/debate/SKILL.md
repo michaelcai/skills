@@ -46,6 +46,55 @@ This debate:
 Begin once confirmed.
 ```
 
+### Step 1.5: Preflight + budget gate
+
+After context confirmation, before any `agent-session spawn`, the moderator runs a 5-line preflight that resolves three independent axes and prints **one combined block** the user signs off on:
+
+1. **Language** (for role prose only — section markers stay English):
+   ```
+   --lang flag → prefs.lang → ≥10 CJK chars in challenge text
+   → ≥50% non-Latin script in challenge text → recent 3 user turns' locale
+   → $LANG runtime locale → fallback "en"
+   ```
+   First non-empty match wins. **Always print the chosen value as a visible line** so autodetect doesn't become hidden state.
+
+2. **Parallelism** (tmux):
+   ```
+   --no-parallel flag → DEBATE_NO_TMUX → no TTY → tmux on PATH? → use it
+   ```
+   Tmux split-pane is *visualization*, not parallelism — the loop in §2.5 / §3 already runs `agent-session` calls concurrently in subprocesses. Tmux just makes the live output legible. Missing tmux → silently degrade to single-pane background output.
+
+3. **Live viewer** (cmux):
+   ```
+   --watch flag (ephemeral) → prefs.view → null
+   ```
+   `view: "cmux"` requires `cmux` + `uv` + Python ≥3.10. Missing any → degrade to no viewer.
+
+4. **Budget estimate** (rough):
+   ```
+   tokens   ≈ M_roles × R_planned × 1.7k       (R_planned default = 6, two checkpoints)
+   wall-clock ≈ longest-role-latency × R_planned   (parallel sends; default 30s/turn)
+   ```
+
+Print one combined gate, wait for user:
+
+```
+Language: zh (autodetected from challenge text, override with /debate --lang xx)
+Parallel: tmux (split panes) | View: cmux (live TUI)
+Debate plan: 4 roles × ~6 rounds ≈ ~40k tokens, ~3 min wall-clock
+Begin? (Y/n)  [or self-critique / cancel]
+```
+
+If a flag/file/tool was missing and we degraded, the corresponding line says so (`Parallel: sequential (tmux not found)`, `View: off (cmux not found, falling back)`). Six possible permutations all show *both* the Parallel and View axes — never silent.
+
+The running token counter reappears at the every-3-round checkpoint:
+
+```
+Tokens: ~Xk used / ~40k planned (estimate)
+```
+
+(The 1.7k constant is a rough estimate; future telemetry will replace it with per-driver real counts. See `agent-session doctor` for auth-identity collisions that make the cross-family premise notional.)
+
 ### Step 2: Plan & spawn
 
 #### 2.1 Workspace
@@ -76,6 +125,8 @@ Path: `~/.config/agents/debate/prefs.json` (XDG, vendor-neutral). Schema:
 ```json
 {
   "version": 1,
+  "lang": null,
+  "view": null,
   "agents": [
     { "backend": "claude",   "model": null },
     { "backend": "opencode", "model": null }
@@ -83,7 +134,11 @@ Path: `~/.config/agents/debate/prefs.json` (XDG, vendor-neutral). Schema:
 }
 ```
 
-`agents` is the **pool** — backends to draw from, not a fixed role assignment. `model: null` means "let the backend pick its own default".
+- `agents` is the **pool** — backends to draw from, not a fixed role assignment. `model: null` means "let the backend pick its own default".
+- `lang` (optional, flat): `null` = autodetect (see §2.5.1); explicit ISO-639-1 (`"en"`, `"zh"`, …) pins the language for **role prose**. Section markers (`## TL;DR`, `[stance: …]`, `## Argument`) stay English regardless.
+- `view` (optional, flat): `null` = no live viewer; `"cmux"` = render the debate in a cmux Textual TUI pane (requires `cmux` + `uv` + Python ≥3.10; degrades cleanly to no viewer if unavailable).
+
+Both new fields are additive — older `prefs.json` files (no `lang` / `view`) keep working.
 
 **First-run bootstrap (file missing).** Show the doctor output and ask the user *which backends to include* — don't default to "all" silently.
 
@@ -95,6 +150,8 @@ Path: `~/.config/agents/debate/prefs.json` (XDG, vendor-neutral). Schema:
 Don't tag backends with a family in the picker — opencode is multi-provider and `(openai)` is misleading.
 
 After the user picks, write the file with the chosen subset, each `model: null`.
+
+**Empty-selection guard.** If the user submits zero backends (`AskUserQuestion` with nothing checked, or empty/`0`/whitespace reply in plain-text mode), do **not** write `prefs.json`. Re-prompt once, prefixed with: *"Debate needs at least one backend in the pool. Pick one or more, or reply `cancel` to abort."* If the second attempt is also empty (or the user replies `cancel`), abort `/debate` with one line — *"`/debate` aborted — no backends selected. Run again any time."* — and exit before any `agent-session spawn`. The file must never exist with `agents: []`; downstream §2.3 P3 assumes ≥1 entry.
 
 **Incremental update (file exists, pool drifted).** Compare prefs.agents vs `agent-session list-backends`:
 
@@ -205,21 +262,26 @@ Defender / Role A / Role B files follow the obvious shape: `## Your role`, `## Y
 
 #### 2.5 Spawn roles
 
-**Use `agent-session` (see ../agent-session/SKILL.md for full CLI).** Spawn each role with the resolved `(backend, model)` and the format rule as `--system-prompt`. Skeleton:
+**Use `agent-session` (see ../agent-session/SKILL.md for full CLI).** Spawn every role **in parallel** — round-1 prompts are independent so the wall-clock is one role's latency, not four:
 
 ```bash
-agent-session spawn \
-  --backend "$DEFENDER_BACKEND" --role-id defender \
-  --prompt-file "$DEBATE_DIR/defender-r1-full.md" \
-  --state-dir "$SESSIONS_DIR" \
-  --system-prompt "You are the Defender in a technical debate. $FORMAT_RULE" \
-  ${DEFENDER_MODEL:+--model "$DEFENDER_MODEL"}
-# repeat for role-id role-a, [role-b], wildcard
+for r in defender role-a role-b wildcard; do
+  [ -f "$DEBATE_DIR/$r-r1-full.md" ] || continue   # role-b is topic-conditional
+  agent-session spawn \
+    --backend "$(eval echo \$${r//-/_}_BACKEND | tr a-z A-Z)" --role-id "$r" \
+    --prompt-file "$DEBATE_DIR/$r-r1-full.md" \
+    --state-dir "$SESSIONS_DIR" \
+    --system-prompt "You are the $r in a technical debate. $FORMAT_RULE" \
+    ${DEFENDER_MODEL:+--model "$DEFENDER_MODEL"} &
+done
+wait
 ```
+
+(If you prefer one explicit invocation per role for clarity, that's fine too — the resolved `(backend, model)` for each came from §2.3.)
 
 After spawn, round-1 output is at `$SESSIONS_DIR/<role-id>/output/r0.txt`.
 
-For parallel spawn (saves wall-clock when backends are slow): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
+For tmux *split-pane visualization* (not for parallelism — the loop above already parallelizes): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
 ### Step 3: Discuss
 
@@ -240,7 +302,19 @@ Build an incremental prompt: only other roles' previous-round TL;DRs + this roun
 {moderator's chosen focus}
 ```
 
-Send sequentially via `agent-session send`: **Role A → Role B (if any) → Wildcard → Defender** (Defender speaks last so it can respond to all).
+Send **in parallel** via `agent-session send` — every role receives the same input (previous-round TL;DRs + this-round focus) and replies independently. Sequential within-round dispatch is **not** required (the round-N prompt only references round N-1, so there's no in-round dialogue) and roughly doubles wall-clock.
+
+```bash
+for r in defender role-a role-b wildcard; do
+  [ -f "$DEBATE_DIR/$r-rN.md" ] || continue   # role-b is topic-conditional
+  agent-session send --role-id "$r" --prompt-file "$DEBATE_DIR/$r-rN.md" --state-dir "$SESSIONS_DIR" &
+done
+wait
+```
+
+If you specifically want Defender to rebut this-round critic arguments, do it as an **optional follow-up half-round** (one extra `send` to defender after collecting Role A/B/Wildcard's r_N), not by ordering the main round. Reserve for the round just before a checkpoint, not every round.
+
+For tmux split panes (visualization, not parallelism — the loop above is already parallel): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
 #### Read strategy (token saving)
 
