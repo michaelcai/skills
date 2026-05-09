@@ -122,11 +122,135 @@ Otherwise capture the available backend list:
 mapfile -t AVAILABLE_BACKENDS < <(agent-session list-backends)
 ```
 
-#### 2.3 Dynamic role generation + backend assignment
+#### 2.2.5 Load / bootstrap user prefs (`~/.config/agents/debate/prefs.json`)
 
-Main agent analyzes the challenge and constructs participants:
+The skill stores per-user backend defaults at:
 
-**Defender (fixed)** — defends the original proposal.
+```
+~/.config/agents/debate/prefs.json
+```
+
+(XDG-style, vendor-neutral — not tied to Claude.) Schema:
+
+```json
+{
+  "version": 1,
+  "agents": [
+    { "backend": "claude",   "model": null },
+    { "backend": "opencode", "model": null }
+  ]
+}
+```
+
+`agents` is the **pool** of backends this user wants to draw from. `model: null` means "let the backend pick its own default" (driver doesn't pass `--model`).
+
+`agents` is a pool, **not** a fixed role assignment — the main agent decides per-debate which agent plays which role (algorithm in §2.3).
+
+##### First-run bootstrap (file does not exist)
+
+If `prefs.json` is missing, the main agent runs the doctor output and asks the user — **plain text, not `AskUserQuestion`** (so this works across Claude Code, Codex CLI, opencode, etc.). Example dialogue:
+
+```
+prefs.json not found — let's set it up.
+
+Detected backends:
+  ✓ claude     (anthropic)
+  ✓ opencode   (openai)
+  ✓ codex      (openai)
+
+Default proposal: include all 3 in your pool, each using its backend's
+default model. You can edit ~/.config/agents/debate/prefs.json later.
+
+OK to write this? (Y/n/edit)
+```
+
+On "Y" the agent writes the file with all detected backends and `model: null` for each. On "edit" the agent walks through customizing one entry at a time.
+
+##### Incremental update (file exists, pool drifted)
+
+On every `/debate`, after `list-backends`, compare prefs.agents vs detected:
+
+- **Detected has new backend not in prefs** → ask: "`<name>` is now installed; add it to your debate pool?"
+- **Prefs has backend that no longer detects** → ask: "`<name>` is no longer detected; remove from pool? (or keep and abort if you ever try to use it)"
+
+Same plain-text prompts. The user can also tell the main agent in-conversation: *"add codex to my debate pool"* / *"set claude's default to sonnet"* — the agent rewrites the file.
+
+After load + sync, validate **≥2 distinct families in the pool**, abort otherwise (same fail-fast as §2.2).
+
+#### 2.3 Per-role assignment algorithm
+
+Each debate has up to three roles: **Defender**, **Role A**, optionally **Role B**. Each role resolves to one `(backend, model)` pair using this priority chain (highest → lowest):
+
+```
+P1. Inline override (this debate only)
+    The user said "this time let codex be defender" in conversation.
+    Main agent honors and skips P2/P3 for that role.
+
+P2. Env var override (this shell session)
+    $DEBATE_<ROLE>_BACKEND  / $DEBATE_<ROLE>_MODEL
+    Useful for one-off experiments without editing prefs.
+
+P3. Main-agent assignment (from the prefs pool)
+    Defender → an agent in the pool whose family matches the
+               main agent's own family. Rationale: the Defender
+               argues on behalf of the original proposal, so it
+               should belong to the same family that produced it.
+               (Claude Code  → anthropic; Codex CLI → openai; etc.)
+               If no same-family agent is in the pool, pick the
+               first pool entry as a fallback.
+    Role A   → first agent in the pool whose family ≠ Defender's family.
+    Role B   → main agent's call: typically the next pool entry not
+               already assigned (same family as Defender with a different
+               model also acceptable, as long as the cross-family rule
+               via Role A is preserved).
+```
+
+**Model resolution** (after the agent is fixed):
+
+```
+1. $DEBATE_<ROLE>_MODEL (env var override)
+2. The model field for this agent in prefs (may be null)
+3. null → spawn omits --model; backend picks
+```
+
+Env var reference (used in P2 / model resolution):
+
+| Var | Effect |
+|---|---|
+| `DEBATE_DEFENDER_BACKEND` / `DEBATE_DEFENDER_MODEL` | Override the Defender |
+| `DEBATE_ROLE_A_BACKEND`   / `DEBATE_ROLE_A_MODEL`   | Override Role A |
+| `DEBATE_ROLE_B_BACKEND`   / `DEBATE_ROLE_B_MODEL`   | Override Role B (if used) |
+
+##### Self-family detection (for P3 Defender pick)
+
+The main agent must know its own family. Use this lookup:
+
+| Runtime | Family |
+|---|---|
+| Claude Code | anthropic |
+| Codex CLI | openai |
+| opencode | openai (default; depends on configured provider) |
+| Gemini CLI | google |
+| other | unknown — fallback to first pool entry |
+
+#### 2.3.1 Print decision and confirm
+
+Before spawning, the main agent **must** print its decision and wait for the user's go-ahead:
+
+```
+Debate assignment:
+  Defender = claude   (default model)
+  Role A   = opencode (default model)
+  [Role B  = codex    (gpt-5.4-mini)]
+Pool source: ~/.config/agents/debate/prefs.json
+Begin? (Y/n)
+```
+
+#### 2.3.2 Dynamic role generation
+
+Independent of backend assignment, the main agent constructs role identities:
+
+**Defender** — defends the original proposal.
 
 **Dynamic role(s) (1-2)** — each must have:
 - Identity description specific to this discussion (e.g. "focus on token refresh logic security in this JWT proposal")
@@ -135,41 +259,7 @@ Main agent analyzes the challenge and constructs participants:
 
 **[MUST]** Role descriptions must be specific to this discussion. Generic descriptions like "security expert" or "performance engineer" are forbidden.
 
-**Backend assignment**: assign each role to a backend from `AVAILABLE_BACKENDS` such that:
-- Defender uses the user's primary model family (typically `claude`)
-- At least one dynamic role uses a **different family** (verify via `agent-session describe` after spawn, or by knowing the backend's family up-front)
-
-Example assignment:
-
-| Role | Backend | Model | Family |
-|---|---|---|---|
-| Defender | claude | (default — backend's own config) | anthropic |
-| Role A (security examiner) | opencode | (configured via OC_MODEL / opencode config) | openai |
-| Role B (perf examiner, optional) | claude | (default, or override via `--model <name>`) | anthropic |
-
-Family check passes: anthropic + openai = 2 distinct.
-
-Pass `--model <name>` to `agent-session spawn` only when you want to override the backend's default for a specific role. Otherwise omit `--model` and let each backend use its own configured default.
-
-#### 2.3.5 User preferences (optional, via env vars)
-
-The user can pin per-role backend / model choices via environment variables. If unset, the main agent decides the backend (subject to ≥2-family rule) and omits `--model` so the backend uses its own default.
-
-| Var | Effect |
-|---|---|
-| `DEBATE_DEFENDER_BACKEND` | Force backend for the Defender (`claude`, `opencode`, `codex`, ...) |
-| `DEBATE_DEFENDER_MODEL` | Force model for the Defender |
-| `DEBATE_ROLE_A_BACKEND` | Force backend for Role A |
-| `DEBATE_ROLE_A_MODEL` | Force model for Role A |
-| `DEBATE_ROLE_B_BACKEND` | Force backend for Role B (if used) |
-| `DEBATE_ROLE_B_MODEL` | Force model for Role B (if used) |
-
-Layered priority (highest → lowest):
-
-1. Env var `DEBATE_<ROLE>_MODEL` (this section)
-2. Backend CLI's own default (e.g. `~/.codex/config.toml`, `OC_MODEL`)
-
-If a forced backend would violate the ≥2-family rule (e.g. user pins all roles to claude), abort with a clear error before spawning.
+If P1 / P2 / P3 produced an assignment that violates the ≥2-family rule (e.g. user pinned all roles to the same family via env vars), abort with a clear error before spawning.
 
 #### 2.4 Prepare prompt files
 
@@ -250,35 +340,32 @@ cat "$DEBATE_DIR/shared-context.md" "$DEBATE_DIR/role-a-r1.md"   > "$DEBATE_DIR/
 
 The minimum form is **sequential** (no extra dependencies). For parallel execution see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
+The main agent has already resolved the (backend, model) for each role in §2.3 and exports them as `<ROLE>_BACKEND` / `<ROLE>_MODEL` (model may be empty → omit `--model`).
+
 ```bash
 FORMAT_RULE='Reply in English. Required output format: first "## TL;DR" (2-3 sentences with the core view), with a single line "[stance: hold/concede/add]" at the end of the TL;DR (always "add" in round 1), then "## Argument" (150-300 words, citing specific code/technical detail). No preamble.'
 
-# Resolve backend & model for each role: env var > main agent's choice > backend default.
-# Defender: defaults to claude (anthropic family) unless user overrides.
-DEFENDER_BACKEND="${DEBATE_DEFENDER_BACKEND:-claude}"
-DEFENDER_MODEL_FLAG=""
-[ -n "${DEBATE_DEFENDER_MODEL:-}" ] && DEFENDER_MODEL_FLAG="--model ${DEBATE_DEFENDER_MODEL}"
-
-# Role A: main agent picks a non-Defender family from $AVAILABLE_BACKENDS unless user overrides.
-ROLE_A_BACKEND="${DEBATE_ROLE_A_BACKEND:-opencode}"
-ROLE_A_MODEL_FLAG=""
-[ -n "${DEBATE_ROLE_A_MODEL:-}" ] && ROLE_A_MODEL_FLAG="--model ${DEBATE_ROLE_A_MODEL}"
+# DEFENDER_BACKEND / DEFENDER_MODEL / ROLE_A_BACKEND / ... already resolved in §2.3.
+defender_model_flag=()
+[ -n "${DEFENDER_MODEL:-}" ] && defender_model_flag=(--model "$DEFENDER_MODEL")
+role_a_model_flag=()
+[ -n "${ROLE_A_MODEL:-}" ] && role_a_model_flag=(--model "$ROLE_A_MODEL")
 
 agent-session spawn \
   --backend "$DEFENDER_BACKEND" --role-id defender \
   --prompt-file "$DEBATE_DIR/defender-r1-full.md" \
   --state-dir "$SESSIONS_DIR" \
   --system-prompt "You are the Defender in a technical debate. $FORMAT_RULE" \
-  $DEFENDER_MODEL_FLAG
+  "${defender_model_flag[@]}"
 
 agent-session spawn \
   --backend "$ROLE_A_BACKEND" --role-id role-a \
   --prompt-file "$DEBATE_DIR/role-a-r1-full.md" \
   --state-dir "$SESSIONS_DIR" \
   --system-prompt "You are {Role A identity}. $FORMAT_RULE" \
-  $ROLE_A_MODEL_FLAG
+  "${role_a_model_flag[@]}"
 
-# (and role-b similarly: respect $DEBATE_ROLE_B_BACKEND / $DEBATE_ROLE_B_MODEL if set)
+# (and role-b similarly with ROLE_B_BACKEND / ROLE_B_MODEL)
 ```
 
 After every `spawn` succeeds, the first-round assistant message is at `$SESSIONS_DIR/<role-id>/output/r0.txt`.

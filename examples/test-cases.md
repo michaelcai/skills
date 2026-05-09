@@ -102,16 +102,16 @@ agent-session cleanup --role-id b1 --state-dir ./state
 ### B2. opencode — basic spawn + output
 
 ```bash
-agent-session spawn --backend opencode --role-id b2 --prompt-file ./p_ready.md --state-dir ./state
+agent-session spawn --backend opencode --role-id b2 --prompt-file ./p_ready.md --state-dir ./state --model openai/gpt-5.4-mini
 agent-session output --role-id b2 --state-dir ./state
 agent-session cleanup --role-id b2 --state-dir ./state
 ```
 
-**Pass**: `output` prints `READY` (or close — opencode's model + system prompt may add slight variance).
+**Pass**: `output` prints `READY` (or close — opencode's model may add slight variance).
 
 **Troubleshooting**:
-- "oc-task begin returned unexpected output" → known parser bug, fixed in commit `dc863a5` or later. `git pull`.
-- Hanging > 60s → check `oc-task` daemon health: `lsof -i :63045` etc.
+- "Model not supported" / "ProviderModelNotFoundError" → the configured opencode default model is unavailable for your auth. Pick a model from `opencode models` and pass it via `--model`.
+- "opencode run produced no sessionID" → the NDJSON shape may have changed in a newer opencode. Run `opencode run "test" --format json | head` and confirm events still carry `sessionID`.
 
 ### B3. codex — basic spawn + output
 
@@ -211,8 +211,8 @@ echo "exit code: $?"   # expected: 0
 
 ```bash
 # Temporarily hide the non-claude backends
-sudo mv $(which oc-task) /tmp/oc-task.hidden 2>/dev/null
-sudo mv $(which codex)   /tmp/codex.hidden   2>/dev/null
+sudo mv $(which opencode) /tmp/opencode.hidden 2>/dev/null
+sudo mv $(which codex)    /tmp/codex.hidden    2>/dev/null
 agent-session doctor
 ```
 
@@ -226,7 +226,7 @@ Now from a Claude Code session, ask: `/debate "test"`.
 **Cleanup**:
 
 ```bash
-sudo mv /tmp/oc-task.hidden $(dirname $(which agent-session))/oc-task 2>/dev/null
+sudo mv /tmp/opencode.hidden $(dirname $(which agent-session))/opencode 2>/dev/null
 sudo mv /tmp/codex.hidden /opt/homebrew/bin/codex 2>/dev/null
 agent-session doctor   # confirm Multi-model: ✓ again
 ```
@@ -278,6 +278,90 @@ Set up a debate where parties might appear to agree on the surface but actually 
 
 ---
 
+## Suite D — prefs.json bootstrap & assignment (interactive)
+
+These tests verify SKILL.md §2.2.5 (prefs.json) and §2.3 (assignment algorithm). Each is a behavioral check on the main agent's flow, not a CLI test.
+
+### D1. First-run bootstrap
+
+**Setup**:
+
+```bash
+mv ~/.config/agents/debate/prefs.json /tmp/prefs.bak 2>/dev/null
+```
+
+In a Claude Code session: `/debate "test"`.
+
+**Pass**:
+1. Main agent prints `prefs.json not found — let's set it up.`
+2. Lists detected backends + families (matches `agent-session doctor`).
+3. Asks for confirmation in **plain text** (not via `AskUserQuestion`).
+4. After "Y", file `~/.config/agents/debate/prefs.json` exists with `version: 1`, `agents` array containing all detected backends, each with `model: null`.
+5. Debate proceeds.
+
+**Verify**:
+
+```bash
+cat ~/.config/agents/debate/prefs.json | python3 -m json.tool
+```
+
+**Cleanup** (if you want to repeat): remove the file again.
+
+### D2. Idempotent read on subsequent runs
+
+With prefs.json in place from D1, run `/debate "test"` again.
+
+**Pass**:
+- No "prefs.json not found" message.
+- No re-prompt for backend selection.
+- Main agent goes straight to the §2.3.1 "Debate assignment: …" block.
+
+### D3. Incremental backend change prompts
+
+**Setup** (simulate an installed-but-not-in-prefs backend by hand-editing):
+
+```bash
+python3 - <<'PY'
+import json, os
+p = os.path.expanduser("~/.config/agents/debate/prefs.json")
+data = json.load(open(p))
+data["agents"] = [a for a in data["agents"] if a["backend"] != "codex"]
+json.dump(data, open(p, "w"), indent=2)
+PY
+agent-session list-backends    # ensure codex is still detected
+```
+
+In Claude Code: `/debate "test"`.
+
+**Pass**: Main agent notices `codex` is detected but not in the pool and asks (plain text):
+> codex is now installed; add it to your debate pool? (Y/n)
+
+After "Y", the file is rewritten and the debate proceeds with codex available for assignment.
+
+### D4. Decision print + user confirmation
+
+For any debate run (D1, D2, or any /debate call), before any `agent-session spawn`:
+
+**Pass**: Main agent prints a block like:
+
+```
+Debate assignment:
+  Defender = claude   (default model)
+  Role A   = opencode (default model)
+Pool source: ~/.config/agents/debate/prefs.json
+Begin? (Y/n)
+```
+
+and waits for the user before spawning. If user says "n" or proposes a swap, the assignment is recomputed (or P1 inline override is honored).
+
+**Restore prefs after Suite D**:
+
+```bash
+mv /tmp/prefs.bak ~/.config/agents/debate/prefs.json 2>/dev/null
+```
+
+---
+
 ## Final teardown
 
 ```bash
@@ -294,6 +378,7 @@ When running all suites, summarize:
 Suite A (install):           [_/4]   notes:
 Suite B (single backend):    [_/6]   notes:
 Suite C (debate):            [_/4]   notes (qualitative):
+Suite D (prefs.json):        [_/4]   notes (qualitative):
 ```
 
 `A` and `B` should be mechanically green. `C` is necessarily interactive — record the LLM's behavior and flag any deviations from SKILL.md.
