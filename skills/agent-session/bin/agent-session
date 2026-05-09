@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -232,80 +231,69 @@ class ClaudeDriver(Driver):
 
 class OpencodeDriver(Driver):
     name = "opencode"
-    family = "openai"  # default; opencode is multi-provider but most users run GPT
+    family = "openai"  # default family tag; opencode is multi-provider but most users run GPT
 
     @classmethod
     def detect(cls) -> Optional[str]:
-        # oc-task is the canonical wrapper; raw `opencode` CLI alone isn't enough for sessions.
-        path = shutil.which("oc-task")
-        if path:
-            return path
-        # Common install path
-        fallback = Path.home() / "workspace" / ".pai" / "skills" / "opencode" / "bin" / "oc-task"
-        return str(fallback) if fallback.exists() else None
+        return shutil.which("opencode")
 
-    def _oc_task(self) -> str:
+    def _opencode(self) -> str:
         path = self.detect()
         if not path:
-            raise RuntimeError("oc-task not found; install opencode skill")
+            raise RuntimeError("opencode not found; install opencode (https://opencode.ai/docs/install)")
         return path
 
-    def _ensure_daemon(self, role_id: str, state_dir: Optional[str], cwd: str) -> dict:
-        """Ensure a daemon is running for this role. Stores port/id in meta."""
-        meta = read_meta(role_id, state_dir) or {}
-        if meta.get("oc_task_port"):
-            return meta  # daemon already running
+    @staticmethod
+    def _parse_run_output(stdout: str) -> tuple[Optional[str], str]:
+        """Parse `opencode run --format json` NDJSON. Returns (sessionID, assistant_text)."""
+        sid: Optional[str] = None
+        chunks: list[str] = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if sid is None and ev.get("sessionID"):
+                sid = ev["sessionID"]
+            if ev.get("type") == "text":
+                part = ev.get("part") or {}
+                text = part.get("text")
+                if text:
+                    chunks.append(text)
+            elif ev.get("type") == "error":
+                err = ev.get("error") or {}
+                msg = (err.get("data") or {}).get("message") or err.get("name") or "unknown error"
+                raise RuntimeError(f"opencode run error: {msg}")
+        return sid, "".join(chunks)
 
-        oc = self._oc_task()
-        # `oc-task begin` outputs `export OC_TASK_ID=... ; export OC_TASK_PORT=...`
-        result = subprocess.run(
-            [oc, "begin", "--yolo", "--cwd", cwd, "--title", f"agent-session-{role_id}"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+    def _run(self, role_id, state_dir, prompt_text, *, session: Optional[str], model: Optional[str]):
+        cmd = [self._opencode(), "run", prompt_text, "--format", "json"]
+        if session:
+            cmd += ["--session", session]
+        else:
+            cmd += ["--title", f"agent-session-{role_id}"]
+        if model:
+            cmd += ["-m", model]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT)
         if result.returncode != 0:
-            raise RuntimeError(f"oc-task begin failed: {result.stderr.strip()}")
-
-        # `oc-task begin` may emit either:
-        #   export OC_TASK_ID=... OC_TASK_PORT=...        (one line, multiple pairs)
-        #   export OC_TASK_ID=...\nexport OC_TASK_PORT=... (multiple lines)
-        # Capture every KEY=VALUE token regardless.
-        env: dict[str, str] = {}
-        for k, v in re.findall(r"(\w+)=(\S+)", result.stdout):
-            env[k] = v.strip('"').strip("'")
-
-        meta["oc_task_id"] = env.get("OC_TASK_ID")
-        meta["oc_task_port"] = env.get("OC_TASK_PORT")
-        if not (meta["oc_task_id"] and meta["oc_task_port"]):
-            raise RuntimeError(f"oc-task begin returned unexpected output:\n{result.stdout}")
-        return meta
-
-    def _fetch_message(self, port: str, sid: str) -> str:
-        """GET /session/<sid>/message and extract latest assistant text."""
-        import urllib.request
-
-        url = f"http://127.0.0.1:{port}/session/{sid}/message"
-        with urllib.request.urlopen(url, timeout=30) as resp:
-            data = json.loads(resp.read())
-        assistant = [m for m in data if m.get("info", {}).get("role") == "assistant"]
-        if not assistant:
-            return ""
-        parts = assistant[-1].get("parts", [])
-        return "".join(p.get("text", "") for p in parts if p.get("type") == "text")
+            append_log(role_id, state_dir, f"opencode run rc={result.returncode}\nstderr:\n{result.stderr}\nstdout:\n{result.stdout}")
+            raise RuntimeError(f"opencode run failed (rc={result.returncode}): {result.stderr.strip() or result.stdout.strip()[:300]}")
+        return self._parse_run_output(result.stdout)
 
     def spawn(self, role_id, prompt_file, model, state_dir, system_prompt):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
 
-        # Build the actual prompt (prepend system_prompt if given; opencode has no separate flag)
-        r0_in = sd / "input" / "r0.md"
+        # opencode has no separate system-prompt flag — prepend if given.
         prompt_content = Path(prompt_file).read_text()
         if system_prompt:
-            r0_in.write_text(f"<system>\n{system_prompt}\n</system>\n\n{prompt_content}")
-        else:
-            r0_in.write_text(prompt_content)
+            prompt_content = f"<system>\n{system_prompt}\n</system>\n\n{prompt_content}"
+        r0_in = sd / "input" / "r0.md"
+        r0_in.write_text(prompt_content)
 
         meta = {
             "backend": "opencode",
@@ -318,55 +306,14 @@ class OpencodeDriver(Driver):
         }
         write_meta(role_id, state_dir, meta)
 
-        cwd = os.environ.get("OC_TASK_CWD", os.getcwd())
-        meta = self._ensure_daemon(role_id, state_dir, cwd)
-        # carry forward meta values set by _ensure_daemon
-        meta.setdefault("backend", "opencode")
-        meta.setdefault("family", "openai")
-        meta.setdefault("model", model or "default")
-        meta.setdefault("round_count", 0)
-        meta["state"] = "spawning"
-        write_meta(role_id, state_dir, meta)
-
-        oc = self._oc_task()
-        env = os.environ.copy()
-        env["OC_TASK_ID"] = meta["oc_task_id"]
-        env["OC_TASK_PORT"] = meta["oc_task_port"]
-
-        spawn_res = subprocess.run(
-            [oc, "spawn", str(r0_in), "--agent", "autoaccept"],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=DEFAULT_TIMEOUT,
-        )
-        if spawn_res.returncode != 0:
-            append_log(role_id, state_dir, f"spawn rc={spawn_res.returncode}\nstderr:\n{spawn_res.stderr}")
+        sid, text = self._run(role_id, state_dir, prompt_content, session=None, model=model)
+        if not sid:
             meta["state"] = "failed"
             write_meta(role_id, state_dir, meta)
-            raise RuntimeError(f"oc-task spawn failed: {spawn_res.stderr.strip()}")
+            raise RuntimeError("opencode run produced no sessionID — check stdout JSON shape")
 
-        opencode_sid = spawn_res.stdout.strip()
-        meta["sid"] = opencode_sid
-        write_meta(role_id, state_dir, meta)
-
-        # Wait for completion
-        wait_res = subprocess.run(
-            [oc, "status", opencode_sid, "--wait", "--timeout", "1800", "--no-text"],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=1800,
-        )
-        if wait_res.returncode != 0:
-            append_log(role_id, state_dir, f"status wait rc={wait_res.returncode}\nstderr:\n{wait_res.stderr}")
-            meta["state"] = "error"
-            write_meta(role_id, state_dir, meta)
-            raise RuntimeError(f"oc-task status wait failed: {wait_res.stderr.strip()}")
-
-        text = self._fetch_message(meta["oc_task_port"], opencode_sid)
         (sd / "output" / "r0.txt").write_text(text)
-
+        meta["sid"] = sid
         meta["round_count"] = 1
         meta["state"] = "active"
         write_meta(role_id, state_dir, meta)
@@ -383,27 +330,17 @@ class OpencodeDriver(Driver):
         rN_in = sd / "input" / f"r{n}.md"
         shutil.copy(prompt_file, rN_in)
 
-        oc = self._oc_task()
-        env = os.environ.copy()
-        env["OC_TASK_ID"] = meta["oc_task_id"]
-        env["OC_TASK_PORT"] = meta["oc_task_port"]
-
-        send_res = subprocess.run(
-            [oc, "send", meta["sid"], str(rN_in), "--agent", "autoaccept"],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=1800,
-        )
-        if send_res.returncode != 0:
-            append_log(role_id, state_dir, f"send r{n} rc={send_res.returncode}\nstderr:\n{send_res.stderr}")
+        model = meta.get("model")
+        if model == "default":
+            model = None
+        try:
+            _, text = self._run(role_id, state_dir, rN_in.read_text(), session=meta["sid"], model=model)
+        except RuntimeError:
             meta["state"] = "error"
             write_meta(role_id, state_dir, meta)
-            raise RuntimeError(f"oc-task send failed: {send_res.stderr.strip()}")
+            raise
 
-        text = self._fetch_message(meta["oc_task_port"], meta["sid"])
         (sd / "output" / f"r{n}.txt").write_text(text)
-
         meta["round_count"] = n + 1
         write_meta(role_id, state_dir, meta)
 
@@ -420,17 +357,14 @@ class OpencodeDriver(Driver):
         if not sd.exists():
             return
         meta = read_meta(role_id, state_dir)
-        if meta and meta.get("oc_task_id"):
+        if meta and meta.get("sid"):
             try:
-                oc = self._oc_task()
                 subprocess.run(
-                    [oc, "end", meta["oc_task_id"]],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
+                    [self._opencode(), "session", "delete", meta["sid"]],
+                    capture_output=True, text=True, timeout=60,
                 )
             except Exception as e:
-                append_log(role_id, state_dir, f"cleanup oc-task end failed: {e}")
+                append_log(role_id, state_dir, f"cleanup opencode session delete failed: {e}")
         shutil.rmtree(sd, ignore_errors=True)
 
 

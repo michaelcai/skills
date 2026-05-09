@@ -1,79 +1,58 @@
 # Backend: opencode
 
-opencode is a multi-provider agent CLI (GPT, Claude, Gemini, local models). The driver wraps `oc-task`, a session-managing thin layer commonly bundled with opencode setups.
+[opencode](https://opencode.ai) is a multi-provider agent CLI (GPT, Claude, Gemini, Groq, local models). The driver wraps the native `opencode run` command — no extra wrappers required.
 
 ## Install
 
-opencode CLI:
-
 ```bash
-npm install -g opencode-ai
-# or follow https://opencode.ai/docs/install
+curl -fsSL https://opencode.ai/install | bash
+# or: npm install -g opencode-ai
 ```
-
-`oc-task` wrapper: comes from the [opencode skill](https://github.com/michaelcai/skills/tree/main/skills/opencode) (or your own setup). The driver looks for `oc-task` in:
-
-1. `$PATH`
-2. `~/workspace/.pai/skills/opencode/bin/oc-task` (PAI default install path)
-
-If neither exists, the driver fails detection.
 
 Verify:
 
 ```bash
-oc-task --help
+opencode --version
+opencode auth list
 ```
+
+You need at least one provider authenticated. See `opencode auth login`.
 
 ## Models
 
-The driver does not hardcode any model list and does not pass `--model` to `oc-task spawn`. opencode picks the model entirely on its own — via env vars (`OC_MODEL`, etc.) and its config file.
+Pass `--model <provider>/<model>` on `agent-session spawn` to pick the model. The string is forwarded verbatim to `opencode run -m`. List installed models with `opencode models`.
 
-Pass `--model` on `agent-session spawn` only if you have a custom driver wiring; the default driver currently ignores it for opencode (opencode's model selection happens out-of-band).
-
-To set a default model:
-
-```bash
-export OC_MODEL=<your-model-name>
-# or configure opencode directly — see https://opencode.ai/docs
-```
+If you omit `--model`, the driver does **not** pass `-m` and opencode uses its configured default (which may fail if the default model is incompatible with your auth — explicitly pick one with `--model` if you hit "model not supported").
 
 ## Session model
 
-The driver uses `oc-task` daemons:
+The driver uses `opencode`'s native session lifecycle:
 
-- `oc-task begin --yolo --cwd <path> --title <name>` starts a daemon and prints `OC_TASK_ID` / `OC_TASK_PORT` env exports
-- `oc-task spawn <prompt-file> --agent autoaccept` creates a session within the daemon, prints session UUID
-- `oc-task status <sid> --wait` blocks until completion
-- `oc-task send <sid> <prompt-file>` sends a follow-up turn
-- `oc-task end <oc-task-id>` shuts down the daemon
+| Phase | Command |
+|---|---|
+| spawn | `opencode run "<prompt>" --title agent-session-<role> --format json [-m <model>]` |
+| send | `opencode run "<prompt>" --session <sid> --format json [-m <model>]` |
+| cleanup | `opencode session delete <sid>` |
 
-Each `agent-session spawn` starts its own daemon (per-role); subsequent `send` calls on the same role-id reuse it. `cleanup` calls `oc-task end`.
+`--format json` emits NDJSON events to stdout. The driver parses:
+- `sessionID` from the first event that carries it (used as the `sid` for subsequent rounds)
+- `part.text` from every `type:"text"` event (concatenated as the assistant's reply)
+- `type:"error"` aborts with the embedded error message
 
-> Per-role daemon is wasteful but simple. A future optimization could share one daemon across all role-ids in the same `--state-dir`.
+The system prompt is prepended into the user prompt as `<system>...</system>` since opencode has no separate `--system-prompt` flag.
 
-## Output format
+## Agent / permissions
 
-The driver fetches the latest assistant message via:
-
-```
-GET http://127.0.0.1:$OC_TASK_PORT/session/<sid>/message
-```
-
-It extracts only `parts[].text` (filters out tool-use, ANSI metadata, etc).
-
-## Permissions
-
-The driver passes `--yolo` and `--agent autoaccept`, which bypasses confirmation prompts. This is intentional for non-interactive backend use. If you want stricter permission scoping, modify the driver to pass `--allow <path>` instead of `--yolo`.
+The driver does **not** pass `--agent` — opencode uses its default agent (typically `build`). Debate-style usage doesn't need tool execution; the agents just answer text. If your default agent prompts for tool permission, configure a non-interactive agent in `~/.config/opencode/opencode.json` and reference it manually.
 
 ## Configuration
 
 | Var | Effect |
 |---|---|
-| `OC_MODEL` | Selects the model opencode runs (read by opencode itself, not by the driver) |
-| `OC_TASK_CWD` | Override the cwd passed to `oc-task begin` (default: current `cwd`) |
+| `--model` | Picks the opencode model (forwarded to `opencode run -m`); omit for opencode's default |
 
 ## Limitations
 
-- The driver assumes opencode's HTTP message API stays at `/session/<sid>/message`. If opencode's API shape changes, `_fetch_message` needs updating.
-- Daemon-per-role is wasteful for many parallel roles.
-- `OC_MODEL` reporting is purely informational — the driver cannot verify the actual model that ran.
+- The driver assumes `opencode run --format json` keeps emitting `sessionID` and `type:"text"` events. If opencode's NDJSON shape changes, `_parse_run_output` needs updating.
+- No streaming output exposed to the caller — the driver reads stdout to completion before writing to `output/r<n>.txt`.
+- Each `agent-session spawn` creates a brand-new opencode session; sessions persist on disk under opencode's own state until explicitly deleted via `cleanup`.
