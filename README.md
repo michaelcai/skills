@@ -88,7 +88,19 @@ Multi-model capability: ✓
 
 ## `agent-session` CLI verbs
 
-- `tldr` — extract TL;DR + stance from the latest round as JSON
+| Verb | Purpose |
+|---|---|
+| `doctor` | health check — list detected backends + auth identities |
+| `list-backends` | one-per-line list of available backend names |
+| `describe` | print a session's metadata as JSON |
+| `spawn` | create a session and run its first turn |
+| `send` | continue an existing session with a new prompt |
+| `status` | read session state (always synchronous) |
+| `output` | read the assistant's reply for a given round (default: latest) |
+| `tldr` | extract `## TL;DR` + `[stance: ...]` from the latest round as JSON |
+| `cleanup` | terminate a session and remove its state |
+
+Run `agent-session <verb> --help` for the full flag set of any verb.
 
 ## Examples & tests
 

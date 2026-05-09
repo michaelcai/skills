@@ -68,5 +68,5 @@ modules:
     loaded_by: moderator-optional
     purpose: "tmux split-pane visualization (NOT a parallelism mechanism for agent-session itself)"
     invariants:
+      - { kind: contains, value: "Visualization, not parallelism" }
       - { kind: contains, value: "tmux" }
-      - { kind: contains, value: "Parallel role execution" }

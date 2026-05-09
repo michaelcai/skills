@@ -1,6 +1,8 @@
 # Parallel role execution via tmux
 
-**When to use**: when at least one backend (e.g. opencode + slow GPT model) takes minutes per turn. Sequential spawn means wall-clock = sum-of-all-roles. With tmux, all roles run concurrently and wall-clock = max-of-all-roles.
+**Visualization, not parallelism.** Concurrency in debate comes from the `& ... wait` shell pattern in SKILL.md §2.5; agent-session subprocess calls already run in parallel without tmux. Tmux's role is visualization — making the live output legible across multiple panes when at least one backend takes minutes per turn. Without tmux, you still get the same wall-clock; you just don't see the per-role progress.
+
+**When to use**: when at least one backend (e.g. opencode + slow GPT model) takes minutes per turn and you want a live view. Sequential spawn means wall-clock = sum-of-all-roles. With concurrent spawn (`&`-backgrounded), wall-clock = max-of-all-roles regardless of whether tmux is involved.
 
 **Prerequisites**: `tmux` available on the host.
 

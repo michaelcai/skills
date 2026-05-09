@@ -15,7 +15,4 @@ You are not a generic \"advocate\". You don't have a specific examination angle 
 
 ## Your output
 
-Follow [`../output-format.md`](../output-format.md) exactly:
-- `## TL;DR` (2-3 sentences with your core defense or concession)
-- `[stance: hold|concede|add]`
-- `## Argument` (150-300 words with specific evidence)
+Follow [`../output-format.md`](../output-format.md) exactly. The TL;DR must answer: do you hold the proposal under this challenge, or where does it concede?
