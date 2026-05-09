@@ -86,6 +86,10 @@ Expected:
 Multi-model capability: ✓
 ```
 
+## `agent-session` CLI verbs
+
+- `tldr` — extract TL;DR + stance from the latest round as JSON
+
 ## Examples & tests
 
 - [`examples/quickstart.md`](./examples/quickstart.md) — verify `agent-session` end-to-end after install (real captured outputs)

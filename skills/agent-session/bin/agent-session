@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """agent-session: persistent multi-turn LLM session abstraction over heterogeneous backend CLIs.
 
-Verbs: doctor, list-backends, describe, spawn, send, status, output, cleanup.
+Verbs: doctor, list-backends, describe, spawn, send, status, output, tldr, cleanup.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,39 @@ def lock(role_id: str, state_dir: Optional[str]):
         yield
     finally:
         lf.unlink(missing_ok=True)
+
+
+def _extract_tldr_and_stance(text: str) -> dict:
+    """Extract debate's TL;DR section and stance tag from a role's latest output.
+
+    Returns {"tldr_text": str | None, "stance": str | None}.
+    `tldr_text` is the content between '## TL;DR' (exclusive of the header line)
+    and the next '## ' heading or end-of-text, with any trailing whitelisted stance
+    tag (`[stance: hold|concede|add]`) stripped, then trimmed.
+    `stance` is one of 'hold' | 'concede' | 'add' if a `[stance: <word>]` tag
+    is present anywhere in the text with a whitelisted value; None otherwise.
+    Note: invalid stance values (e.g. `[stance: maybe]`) stay in `tldr_text` —
+    the helper does not try to clean malformed output.
+    """
+    if not text:
+        return {"tldr_text": None, "stance": None}
+    # Match the section starting with '## TL;DR' until the next '## ' or end.
+    tldr_match = re.search(
+        r"^## TL;DR[^\n]*\n(.*?)(?=^## |\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    tldr_text = tldr_match.group(1).strip() if tldr_match else None
+    # Remove any trailing stance tag line from tldr_text, then trim again
+    if tldr_text:
+        tldr_text = re.sub(r'\n?\[stance:\s*(hold|concede|add)\s*\]\s*$', '', tldr_text)
+        tldr_text = tldr_text.strip()
+    stance_match = re.search(
+        r"\[stance:\s*(hold|concede|add)\s*\]",
+        text,
+    )
+    stance = stance_match.group(1) if stance_match else None
+    return {"tldr_text": tldr_text, "stance": stance}
 
 
 # ============================================================
@@ -785,6 +819,37 @@ def cmd_output(args) -> int:
     return 0
 
 
+def cmd_tldr(args) -> int:
+    """Return JSON {role_id, round_count, tldr_text, stance} for the latest round.
+
+    Owned format knowledge: `## TL;DR` / `[stance: hold|concede|add]` come from debate's
+    output schema (see references in debate/SKILL.md). Centralized here so consumers
+    don't reimplement extraction.
+    """
+    sd = session_dir(args.role_id, args.state_dir)
+    meta = read_meta(args.role_id, args.state_dir)
+    if not meta:
+        print(json.dumps({"error": "session not found", "role_id": args.role_id}), file=sys.stderr)
+        return 2
+    n = args.round if args.round is not None else meta["round_count"] - 1
+    f = sd / "output" / f"r{n}.txt"
+    if not f.exists():
+        print(json.dumps({"error": "output round not found", "role_id": args.role_id, "round": n}), file=sys.stderr)
+        return 2
+    text = f.read_text()
+    if not text.strip():
+        print(json.dumps({"error": "empty output", "role_id": args.role_id, "round": n}), file=sys.stderr)
+        return 2
+    extracted = _extract_tldr_and_stance(text)
+    print(json.dumps({
+        "role_id": args.role_id,
+        "round_count": meta.get("round_count", 0),
+        "tldr_text": extracted["tldr_text"],
+        "stance": extracted["stance"],
+    }))
+    return 0
+
+
 def cmd_cleanup(args) -> int:
     drv = get_driver_for_session(args.role_id, args.state_dir)
     if not drv:
@@ -837,6 +902,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_output.add_argument("--state-dir")
     p_output.add_argument("--round", type=int)
 
+    p_tldr = sub.add_parser("tldr", help="extract TL;DR + stance as JSON for the latest round")
+    p_tldr.add_argument("--role-id", required=True)
+    p_tldr.add_argument("--state-dir")
+    p_tldr.add_argument("--round", type=int)
+
     p_cleanup = sub.add_parser("cleanup", help="close session and remove state")
     p_cleanup.add_argument("--role-id", required=True)
     p_cleanup.add_argument("--state-dir")
@@ -852,6 +922,7 @@ HANDLERS = {
     "send": cmd_send,
     "status": cmd_status,
     "output": cmd_output,
+    "tldr": cmd_tldr,
     "cleanup": cmd_cleanup,
 }
 

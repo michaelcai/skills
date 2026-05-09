@@ -1,0 +1,6 @@
+## TL;DR
+Looks fine but the stance tag is wrong.
+[stance: maybe]
+
+## Argument
+Body content.

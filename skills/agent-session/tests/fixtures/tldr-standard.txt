@@ -1,0 +1,6 @@
+## TL;DR
+This is the canonical case — single-line TL;DR, valid stance tag.
+[stance: hold]
+
+## Argument
+Body that the extractor must NOT include in tldr_text.

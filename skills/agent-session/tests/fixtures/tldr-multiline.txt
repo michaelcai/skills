@@ -1,0 +1,8 @@
+## TL;DR
+First sentence of the TL;DR.
+Second sentence on a new line.
+Third sentence elaborating further.
+[stance: concede]
+
+## Argument
+Body content.

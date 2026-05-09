@@ -1,0 +1,5 @@
+## TL;DR
+Body has no stance tag anywhere.
+
+## Argument
+Body content.

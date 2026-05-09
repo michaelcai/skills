@@ -173,6 +173,70 @@ rc=$?
 assert_rc $rc 2 "duplicate spawn without --force exits 2"
 assert_contains "$out" "already exists" "duplicate spawn says 'already exists'"
 
+# ============================================================
+# tldr verb
+# ============================================================
+echo ""
+echo "Test: tldr verb (7 fixture-based cases)"
+
+TLDR_FIXTURE_DIR="$SCRIPT_DIR/fixtures"
+TLDR_DIR="$TMPDIR_BASE/tldr"
+mkdir -p "$TLDR_DIR"
+
+# Helper: set up a fake session with a given fixture as r0 output, round_count=1
+setup_tldr_session() {
+  local role="$1" fixture="$2"
+  local d="$TLDR_DIR/$role/output"
+  mkdir -p "$d"
+  cp "$TLDR_FIXTURE_DIR/$fixture" "$d/r0.txt"
+  cat > "$TLDR_DIR/$role/meta.json" <<EOF
+{"role_id": "$role", "backend": "claude", "model": null, "round_count": 1, "state": "active"}
+EOF
+}
+
+# Case 1: standard format → tldr_text non-null, stance == "hold"
+setup_tldr_session "tldr1" "tldr-standard.txt"
+out=$("$AS" tldr --role-id tldr1 --state-dir "$TLDR_DIR")
+assert_eq "$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"])')" "hold" "tldr standard: stance=hold"
+assert_eq "$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("yes" if d["tldr_text"] and "canonical" in d["tldr_text"] else "no")')" "yes" "tldr standard: tldr_text contains 'canonical'"
+
+# Case 2: multiline TL;DR preserves internal newlines, trims edges
+setup_tldr_session "tldr2" "tldr-multiline.txt"
+out=$("$AS" tldr --role-id tldr2 --state-dir "$TLDR_DIR")
+assert_eq "$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"])')" "concede" "tldr multiline: stance=concede"
+assert_eq "$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["tldr_text"].count("\n"))')" "2" "tldr multiline: 3-line body has 2 internal newlines"
+
+# Case 3: no stance tag → stance == null
+setup_tldr_session "tldr3" "tldr-no-stance.txt"
+out=$("$AS" tldr --role-id tldr3 --state-dir "$TLDR_DIR")
+assert_eq "$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"] is None)')" "True" "tldr no-stance: stance is null"
+
+# Case 4: no TL;DR section → tldr_text == null, stance found mid-text
+setup_tldr_session "tldr4" "tldr-no-section.txt"
+out=$("$AS" tldr --role-id tldr4 --state-dir "$TLDR_DIR")
+rc=$?
+assert_rc $rc 0 "tldr no-section: exit 0 (silent-failure observability)"
+assert_eq "$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["tldr_text"] is None)')" "True" "tldr no-section: tldr_text is null"
+assert_eq "$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"])')" "add" "tldr no-section: stance still detected mid-text"
+
+# Case 5: empty output → exit 2 with error
+setup_tldr_session "tldr5" "tldr-empty.txt"
+out=$("$AS" tldr --role-id tldr5 --state-dir "$TLDR_DIR" 2>&1 >/dev/null)
+rc=$?
+assert_rc $rc 2 "tldr empty: exit 2"
+assert_contains "$out" "empty output" "tldr empty: stderr says 'empty output'"
+
+# Case 6: invalid stance value → stance == null (whitelist enforced)
+setup_tldr_session "tldr6" "tldr-invalid-stance.txt"
+out=$("$AS" tldr --role-id tldr6 --state-dir "$TLDR_DIR")
+assert_eq "$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"] is None)')" "True" "tldr invalid stance: stance is null (not 'maybe')"
+
+# Case 7: session not found
+out=$("$AS" tldr --role-id ghost --state-dir "$TLDR_DIR" 2>&1 >/dev/null)
+rc=$?
+assert_rc $rc 2 "tldr ghost: exit 2"
+assert_contains "$out" "session not found" "tldr ghost: stderr says 'session not found'"
+
 echo ""
 echo "================================================"
 echo "Result: $PASS passed, $FAIL failed"

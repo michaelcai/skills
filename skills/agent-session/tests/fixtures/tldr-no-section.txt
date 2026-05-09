@@ -1,0 +1,5 @@
+## Summary
+
+The agent decided not to use the prescribed format.
+Some thoughtful reply that lacks the TL;DR header.
+[stance: add]
