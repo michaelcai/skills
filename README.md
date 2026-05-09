@@ -96,6 +96,15 @@ Multi-model capability: ✓
 - [`examples/sample-debate.md`](./examples/sample-debate.md) — illustrative `/debate` transcript: proposal, challenge, 2 rounds, checkpoint, conclusion
 - [`examples/test-cases.md`](./examples/test-cases.md) — complete acceptance test suite (install init, single-backend smoke, debate end-to-end). Run after install.
 
+### Test-time dependencies
+
+- `pyyaml` (only used by `skills/debate/tests/manifest-invariants.sh`). The smoke test SKIPs cleanly without it; CI should install it for strict invariant verification:
+  ```bash
+  pip install pyyaml
+  # or with uv:
+  uv pip install pyyaml
+  ```
+
 ## Maintenance (for the author)
 
 Edit `skills/<name>/SKILL.md` directly, then commit + push to publish.

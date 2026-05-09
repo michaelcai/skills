@@ -1,0 +1,72 @@
+# debate prompt-modules manifest — single source of truth for SKILL.md splits.
+#
+# Every entry declares:
+#   id          — handle used in references and tests
+#   path        — file location relative to skills/debate/
+#   loaded_by   — when/where this module enters the system
+#                   role-session       : included in role's first-turn prompt at spawn
+#                   role-system-prompt : included in role's system prompt at spawn (every turn)
+#                   moderator-optional : moderator may read it under specific conditions; not auto-loaded
+#   purpose     — one-line human description for onboarding / review
+#   invariants  — machine-checkable assertions enforced by tests/manifest-invariants.sh
+#                   kind: contains      → value MUST appear as a substring
+#                   kind: forbidden     → value MUST NOT appear as a substring
+#                   kind: contains_any  → at least one of values MUST appear
+#                   kind: contains_all  → every one of values MUST appear
+
+version: 1
+modules:
+  - id: role-defender
+    path: references/roles/defender.md
+    loaded_by: role-session
+    purpose: "Defender role identity and per-round instruction template"
+    invariants:
+      - { kind: contains,  value: "defend the original proposal" }
+      - { kind: forbidden, value: "## Your examination angle" }
+
+  - id: role-role-a
+    path: references/roles/role-a.md
+    loaded_by: role-session
+    purpose: "Role A - first focused critic, scoped to a specific examination angle"
+    invariants:
+      - { kind: contains, value: "## Your examination angle" }
+
+  - id: role-role-b
+    path: references/roles/role-b.md
+    loaded_by: role-session
+    purpose: "Role B (topic-conditional) - distinct second examination angle"
+    invariants:
+      - { kind: contains, value: "## Your examination angle" }
+
+  - id: role-wildcard
+    path: references/roles/wildcard.md
+    loaded_by: role-session
+    purpose: "Wildcard - divergent thinker, NOT scoped to a specific angle"
+    invariants:
+      - { kind: contains,  value: "NOT scoped" }
+      - { kind: forbidden, value: "## Your examination angle" }
+
+  - id: output-format
+    path: references/output-format.md
+    loaded_by: role-system-prompt
+    purpose: "Mandatory output schema - TL;DR + stance + Argument"
+    invariants:
+      - { kind: contains,     value: "## TL;DR" }
+      - { kind: contains,     value: "[stance:" }
+      - { kind: contains_any, values: ["hold", "concede", "add"] }
+      - { kind: contains,     value: "## Argument" }
+
+  - id: stance-tags
+    path: references/stance-tags.md
+    loaded_by: role-system-prompt
+    purpose: "Stance tag semantics - closed set hold/concede/add"
+    invariants:
+      - { kind: contains_all, values: ["hold", "concede", "add"] }
+
+  - id: parallel-tmux
+    path: references/parallel-tmux.md
+    loaded_by: moderator-optional
+    purpose: "tmux split-pane visualization (NOT a parallelism mechanism for agent-session itself)"
+    invariants:
+      - { kind: contains, value: "tmux" }
+      - { kind: contains, value: "Parallel role execution" }

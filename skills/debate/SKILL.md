@@ -207,52 +207,14 @@ A debate has 3 or 4 roles. The main agent constructs identities — keep them sp
 | Role B | topic-conditional | A *clearly distinct* second angle. Skip if it would just paraphrase Role A. |
 | Wildcard | yes | **Not** scoped to an angle. May raise issues outside the user's stated challenge — that is the value. |
 
-#### 2.4 Prompt files
+#### 2.4 Prompt files (uses references/)
 
-Write a **shared context** once at `$DEBATE_DIR/shared-context.md` — Original proposal / Challenge / Project context — and a per-role **first-turn instructions** file. The full first-turn prompt = shared-context + role file (concatenate or pass both).
+For each role, debate's first-turn input is the concatenation of (a) `$DEBATE_DIR/shared-context.md` (the original proposal + challenge + project context the moderator writes) and (b) the role's identity module from `references/roles/<role-id>.md`. The role's system prompt at spawn time wraps `references/output-format.md` so every reply matches the output schema.
 
-The Wildcard role file should resemble:
+The complete registry of prompt modules — paths, load points, and per-module invariants — lives in [`references/_manifest.yaml`](./references/_manifest.yaml). Smoke tests in `tests/manifest-invariants.sh` verify the registry.
 
-```markdown
-## Your role
-Divergent thinker. You are NOT scoped to a specific examination angle.
+When you modify a module: also update its invariants in the manifest if behavior changes, then re-run `tests/manifest-invariants.sh` before committing.
 
-## Your job
-Bring perspectives the focused critics will miss. Examples (pick what fits — don't do all):
-- Question premises (is this even the right problem?)
-- Second-order or systemic effects
-- Contrarian framings
-- Analogies from adjacent domains
-- Failure modes nobody asked about (silent / 2-year / 10× scale)
-
-You may raise issues OUTSIDE the user's stated challenge — that is this role's value. Don't try to be balanced.
-
-## Focus this round
-Pick whichever divergent angle gives the most leverage on this proposal.
-```
-
-Defender / Role A / Role B files follow the obvious shape: `## Your role`, `## Your examination focus`, `## Focus this round`. Compose them yourself.
-
-**Output format (mandatory, passed to every role as their system prompt at spawn)**:
-
-```
-## TL;DR
-(2-3 sentences with the core view)
-[stance: hold/concede/add]
-
-## Argument
-(150-300 words, supported by specific code/technical detail)
-```
-
-**Stance tag semantics**:
-
-| Tag | Meaning | Moderator interpretation |
-|---|---|---|
-| `hold` | Maintains stance after counter-argument | Disagreement remains |
-| `concede` | Adjusts own stance | Local convergence |
-| `add` | Parallel expansion (no direct response) | Beware false consensus |
-
-(Round 1: every role tags `add`; the tag matters from round 2.)
 
 #### 2.5 Spawn roles
 
