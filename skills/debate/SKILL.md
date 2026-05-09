@@ -293,21 +293,31 @@ Read each role's `r0` output via `agent-session output --role-id <id> --state-di
 
 Build an incremental prompt: only other roles' previous-round TL;DRs + this round's focus. The session already holds prior context; do not repeat the proposal/challenge.
 
+**[MUST] One shared prompt file per round, not one-per-role.** Write a single `$DEBATE_DIR/rN.md` containing all roles' previous-round TL;DRs once + per-role focus as subsections. Pass the SAME file to every `agent-session send`. This avoids re-writing the same "Last round TL;DRs" block N times into the moderator's context.
+
 ```markdown
+<!-- $DEBATE_DIR/rN.md (single shared file for round N) -->
 ## Last round, other participants (TL;DR)
-### {role}: {2-3 sentence TL;DR}
-### {role}: {2-3 sentence TL;DR}
+### Defender: {2-3 sentence TL;DR}
+### Role A: {2-3 sentence TL;DR}
+### Role B: {2-3 sentence TL;DR}
+### Wildcard: {2-3 sentence TL;DR}
 
 ## Focus this round
-{moderator's chosen focus}
+- **Defender**: {role-specific focus, 1-2 lines}
+- **Role A**:   {role-specific focus, 1-2 lines}
+- **Role B**:   {role-specific focus, 1-2 lines}
+- **Wildcard**: {role-specific focus, 1-2 lines}
 ```
 
-Send **in parallel** via `agent-session send` — every role receives the same input (previous-round TL;DRs + this-round focus) and replies independently. Sequential within-round dispatch is **not** required (the round-N prompt only references round N-1, so there's no in-round dialogue) and roughly doubles wall-clock.
+Each role sees its own "Defender: …" line plus its peers' — that's exactly what's needed.
+
+Send **in parallel** — every role receives the same file and replies independently. Sequential within-round dispatch is **not** required (the prompt only references round N-1, so there's no in-round dialogue) and roughly doubles wall-clock.
 
 ```bash
 for r in defender role-a role-b wildcard; do
-  [ -f "$DEBATE_DIR/$r-rN.md" ] || continue   # role-b is topic-conditional
-  agent-session send --role-id "$r" --prompt-file "$DEBATE_DIR/$r-rN.md" --state-dir "$SESSIONS_DIR" &
+  agent-session describe --role-id "$r" --state-dir "$SESSIONS_DIR" >/dev/null 2>&1 || continue
+  agent-session send --role-id "$r" --prompt-file "$DEBATE_DIR/rN.md" --state-dir "$SESSIONS_DIR" &
 done
 wait
 ```
@@ -316,9 +326,20 @@ If you specifically want Defender to rebut this-round critic arguments, do it as
 
 For tmux split panes (visualization, not parallelism — the loop above is already parallel): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
-#### Read strategy (token saving)
+#### [MUST] Read strategy (token saving)
 
-[MUST] Prefer reading the TL;DR section over the full Argument. Each session holds full history in agent-session; the moderator never needs to "compress". Read full Argument only at checkpoints, when the user asks, or when the stance distribution flags a problem.
+The main agent has a context window. Each round's full Argument bodies × N rounds × M roles will exhaust it. Two rules:
+
+**(a) Read TL;DR, not Argument.** Use the section grep, not the full output:
+
+```bash
+agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" \
+  | sed -n '/^## TL;DR/,/^## /{/^## [^T]/q;p}'
+```
+
+(Stops at the next non-TL;DR header — gives you TL;DR + stance tag, ~5 lines instead of 200.) Read the full Argument only at checkpoints, when the user asks, or when stance distribution warrants verification.
+
+**(b) Construct the round-N+1 prompt file via shell, not by quoting outputs into your assistant message.** When a tool result returned a 200-line role output, do NOT re-include it verbatim in your reasoning to "show the user what each said". Pipe to `sed`, capture into a variable, write the variable to the next prompt file. The role's session already holds its full history in agent-session — the moderator never needs to repeat anything.
 
 #### [MUST] False-consensus guard
 
