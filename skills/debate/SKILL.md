@@ -48,7 +48,7 @@ Begin once confirmed.
 
 ### Step 1.5: Preflight + budget gate
 
-After context confirmation, before any `agent-session spawn`, the moderator runs a 5-line preflight that resolves three independent axes and prints **one combined block** the user signs off on:
+After context confirmation, before any `agent-session spawn`, the moderator runs a short preflight that resolves two independent axes and prints **one combined block** the user signs off on:
 
 1. **Language** (for role prose only — section markers stay English):
    ```
@@ -64,13 +64,7 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
    ```
    Tmux split-pane is *visualization*, not parallelism — the loop in §2.5 / §3 already runs `agent-session` calls concurrently in subprocesses. Tmux just makes the live output legible. Missing tmux → silently degrade to single-pane background output.
 
-3. **Live viewer** (cmux):
-   ```
-   --watch flag (ephemeral) → prefs.view → null
-   ```
-   `view: "cmux"` requires `cmux` + `uv` + Python ≥3.10. Missing any → degrade to no viewer.
-
-4. **Budget estimate** (rough):
+3. **Budget estimate** (rough):
    ```
    tokens   ≈ M_roles × R_planned × 1.7k       (R_planned default = 6, two checkpoints)
    wall-clock ≈ longest-role-latency × R_planned   (parallel sends; default 30s/turn)
@@ -80,12 +74,12 @@ Print one combined gate, wait for user:
 
 ```
 Language: zh (autodetected from challenge text, override with /debate --lang xx)
-Parallel: tmux (split panes) | View: cmux (live TUI)
+Parallel: tmux (split panes)
 Debate plan: 4 roles × ~6 rounds ≈ ~40k tokens, ~3 min wall-clock
 Begin? (Y/n)  [or self-critique / cancel]
 ```
 
-If a flag/file/tool was missing and we degraded, the corresponding line says so (`Parallel: sequential (tmux not found)`, `View: off (cmux not found, falling back)`). Six possible permutations all show *both* the Parallel and View axes — never silent.
+If a flag/file/tool was missing and we degraded, the corresponding line says so (`Parallel: sequential (tmux not found)`).
 
 The running token counter reappears at the every-3-round checkpoint:
 
@@ -126,7 +120,6 @@ Path: `~/.config/agents/debate/prefs.json` (XDG, vendor-neutral). Schema:
 {
   "version": 1,
   "lang": null,
-  "view": null,
   "agents": [
     { "backend": "claude",   "model": null },
     { "backend": "opencode", "model": null }
@@ -136,9 +129,8 @@ Path: `~/.config/agents/debate/prefs.json` (XDG, vendor-neutral). Schema:
 
 - `agents` is the **pool** — backends to draw from, not a fixed role assignment. `model: null` means "let the backend pick its own default".
 - `lang` (optional, flat): `null` = autodetect (see §2.5.1); explicit ISO-639-1 (`"en"`, `"zh"`, …) pins the language for **role prose**. Section markers (`## TL;DR`, `[stance: …]`, `## Argument`) stay English regardless.
-- `view` (optional, flat): `null` = no live viewer; `"cmux"` = render the debate in a cmux Textual TUI pane (requires `cmux` + `uv` + Python ≥3.10; degrades cleanly to no viewer if unavailable).
 
-Both new fields are additive — older `prefs.json` files (no `lang` / `view`) keep working.
+The `lang` field is additive — older `prefs.json` files (no `lang`) keep working.
 
 **First-run bootstrap (file missing).** Show the doctor output and ask the user *which backends to include* — don't default to "all" silently.
 
@@ -293,31 +285,60 @@ Read each role's `r0` output via `agent-session output --role-id <id> --state-di
 
 Build an incremental prompt: only other roles' previous-round TL;DRs + this round's focus. The session already holds prior context; do not repeat the proposal/challenge.
 
-**[MUST] One shared prompt file per round, not one-per-role.** Write a single `$DEBATE_DIR/rN.md` containing all roles' previous-round TL;DRs once + per-role focus as subsections. Pass the SAME file to every `agent-session send`. This avoids re-writing the same "Last round TL;DRs" block N times into the moderator's context.
+**[MUST] One shared prompt file per round, assembled by shell — not by quoting role outputs into the moderator's assistant message.** This is the single biggest source of context bloat: dumping every role's TL;DR into the moderator's message stream every round adds ~100 tokens × M_roles × N_rounds. The moderator should never need to read or re-quote a TL;DR to assemble the next round.
 
-```markdown
-<!-- $DEBATE_DIR/rN.md (single shared file for round N) -->
-## Last round, other participants (TL;DR)
-### Defender: {2-3 sentence TL;DR}
-### Role A: {2-3 sentence TL;DR}
-### Role B: {2-3 sentence TL;DR}
-### Wildcard: {2-3 sentence TL;DR}
+##### After-round step (runs immediately after every `wait` finishes)
 
-## Focus this round
-- **Defender**: {role-specific focus, 1-2 lines}
-- **Role A**:   {role-specific focus, 1-2 lines}
-- **Role B**:   {role-specific focus, 1-2 lines}
-- **Wildcard**: {role-specific focus, 1-2 lines}
+Extract each role's TL;DR into a per-role file. The moderator does **not** read the output — `sed` writes straight to disk:
+
+```bash
+mkdir -p "$DEBATE_DIR/tldrs"
+for r in defender role-a role-b wildcard; do
+  agent-session describe --role-id "$r" --state-dir "$SESSIONS_DIR" >/dev/null 2>&1 || continue
+  agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" \
+    | sed -n '/^## TL;DR/,/^## /{/^## [^T]/q;p}' \
+    > "$DEBATE_DIR/tldrs/$r.md"
+done
 ```
 
-Each role sees its own "Defender: …" line plus its peers' — that's exactly what's needed.
+Each `tldrs/<role>.md` is overwritten each round with the latest TL;DR. **Don't read these files into the moderator's message** — they're for the *next* round's prompt assembly.
+
+##### Pre-round step (assembling rN.md without reading TL;DRs)
+
+```bash
+N=2  # next round number
+{
+  echo "## Last round, other participants (TL;DR)"
+  for r in defender role-a role-b wildcard; do
+    [ -f "$DEBATE_DIR/tldrs/$r.md" ] || continue
+    echo
+    echo "### $r"
+    cat "$DEBATE_DIR/tldrs/$r.md"
+  done
+  echo
+  echo "## Focus this round"
+} > "$DEBATE_DIR/r${N}.md"
+```
+
+Now the moderator appends only a **4-line focus block** — that is the ONLY content from this round that lands in the moderator's assistant message:
+
+```bash
+cat >> "$DEBATE_DIR/r${N}.md" <<'EOF'
+- **Defender**: {1-2 line focus}
+- **Role A**:   {1-2 line focus}
+- **Role B**:   {1-2 line focus}
+- **Wildcard**: {1-2 line focus}
+EOF
+```
+
+Pass the SAME file to every `agent-session send` — each role sees the full TL;DR block plus all four focus lines (the role can self-select its own line).
 
 Send **in parallel** — every role receives the same file and replies independently. Sequential within-round dispatch is **not** required (the prompt only references round N-1, so there's no in-round dialogue) and roughly doubles wall-clock.
 
 ```bash
 for r in defender role-a role-b wildcard; do
   agent-session describe --role-id "$r" --state-dir "$SESSIONS_DIR" >/dev/null 2>&1 || continue
-  agent-session send --role-id "$r" --prompt-file "$DEBATE_DIR/rN.md" --state-dir "$SESSIONS_DIR" &
+  agent-session send --role-id "$r" --prompt-file "$DEBATE_DIR/r${N}.md" --state-dir "$SESSIONS_DIR" &
 done
 wait
 ```
@@ -328,18 +349,13 @@ For tmux split panes (visualization, not parallelism — the loop above is alrea
 
 #### [MUST] Read strategy (token saving)
 
-The main agent has a context window. Each round's full Argument bodies × N rounds × M roles will exhaust it. Two rules:
+The main agent has a context window. Each round's full Argument bodies × N rounds × M roles will exhaust it. Three rules:
 
-**(a) Read TL;DR, not Argument.** Use the section grep, not the full output:
+**(a) Inter-round TL;DRs never enter the moderator's message.** The After-round step above pipes `agent-session output | sed` straight to `tldrs/<role>.md` and the Pre-round step `cat`s those files into `rN.md`. The moderator's only inter-round contribution to its own context is the 4-line focus block.
 
-```bash
-agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" \
-  | sed -n '/^## TL;DR/,/^## /{/^## [^T]/q;p}'
-```
+**(b) Read TL;DRs only at the every-3-round checkpoint.** When you reach a checkpoint, *then* the moderator may `cat $DEBATE_DIR/tldrs/*.md` once to synthesize the consensus/divergence block. Read the full Argument only when the user asks or when the stance distribution warrants verification.
 
-(Stops at the next non-TL;DR header — gives you TL;DR + stance tag, ~5 lines instead of 200.) Read the full Argument only at checkpoints, when the user asks, or when stance distribution warrants verification.
-
-**(b) Construct the round-N+1 prompt file via shell, not by quoting outputs into your assistant message.** When a tool result returned a 200-line role output, do NOT re-include it verbatim in your reasoning to "show the user what each said". Pipe to `sed`, capture into a variable, write the variable to the next prompt file. The role's session already holds its full history in agent-session — the moderator never needs to repeat anything.
+**(c) Never re-quote role outputs into the assistant message.** When a tool result surfaced a 200-line role output, do NOT re-include it verbatim "to show the user what each said" — the user can `cat` the file themselves. The role's session holds its full history in agent-session — the moderator never needs to repeat anything.
 
 #### [MUST] False-consensus guard
 
@@ -377,6 +393,25 @@ Text similarity is unreliable. Same TL;DR + different stance tags = strongest fa
 
 User responses: "continue" → 3 more rounds; "switch direction" → adjust focus; "enough" → Step 4.
 
+##### [MUST] Running summary (so later checkpoints don't re-read early rounds)
+
+After printing each checkpoint to the user, append the same block to `$DEBATE_DIR/running-summary.md`:
+
+```bash
+{
+  echo
+  echo "---"
+  echo "## Checkpoint after rounds $((N-2))-$N"
+  cat <<'EOF'
+{paste the same Consensus / Divergence / Judgment block you just showed the user}
+EOF
+} >> "$DEBATE_DIR/running-summary.md"
+```
+
+At the **second** checkpoint (rounds 4–6) and beyond, the moderator reads `running-summary.md` (compact, accumulating) instead of re-reading every round's TL;DRs. The current round's `tldrs/*.md` is still read for fresh synthesis, but the moderator does not re-read tldrs from rounds you've already summarized.
+
+This means the moderator's context grows by one ~15-line summary per checkpoint, not by 4 × 5-line TL;DRs × every round.
+
 ### Step 4: Conclude
 
 ```markdown
@@ -408,18 +443,9 @@ for role in defender role-a role-b wildcard; do
   agent-session cleanup --role-id "$role" --state-dir "$SESSIONS_DIR" 2>/dev/null || true
 done
 
-# 2. Close the live viewer pane if Step 1.5 spawned one
-if [ -f "$DEBATE_DIR/viewer.env" ]; then
-  source "$DEBATE_DIR/viewer.env"
-  [ -n "${VIEWER_SURFACE:-}" ] && cmux close-surface --surface "$VIEWER_SURFACE" 2>/dev/null || true
-  pkill -f "debate-viewer.py.*$SESSIONS_DIR" 2>/dev/null || true
-fi
-
-# 3. Wipe the debate workspace
+# 2. Wipe the debate workspace
 rm -rf "$DEBATE_DIR"
 ```
-
-[MUST] If §1.5 wrote `$DEBATE_DIR/viewer.env` (i.e. `view: cmux` was active and the cmux pane was opened), you **must** close that pane in cleanup — leaving an orphan pane is silent state pollution. The viewer process pkill is belt-and-suspenders for the case where `cmux close-surface` succeeds but the python child wasn't a child of cmux's pty.
 
 For tmux split mode see [`references/parallel-tmux.md`](./references/parallel-tmux.md) for its analogous cleanup.
 
@@ -430,7 +456,6 @@ For tmux split mode see [`references/parallel-tmux.md`](./references/parallel-tm
 - **`agent-session` skill** (hard) — backend abstraction; same repo
 - **≥1 backend CLI** — claude / opencode / codex / gemini / etc; ≥2 distinct families recommended
 - **tmux** (optional) — parallel spawn, see [`references/parallel-tmux.md`](./references/parallel-tmux.md)
-- **cmux + uv + Python ≥3.10** (optional) — live TUI viewer, see [`references/visual-cmux-viewer.md`](./references/visual-cmux-viewer.md)
 
 ## Exception handling
 

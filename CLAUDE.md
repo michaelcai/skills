@@ -29,7 +29,7 @@ skills/
 │   └── tests/run-unit.sh
 └── debate/                         multi-model peer debate (depends on agent-session)
     ├── SKILL.md
-    ├── references/                 optional enhancements (parallel-tmux, cmux viewer)
+    ├── references/                 optional enhancements (parallel-tmux)
     └── tests/run-unit.sh
 ```
 

@@ -26,11 +26,6 @@ extract_tldr() {
   sed -n '/^## TL;DR/,/^## /p' "$1" | sed '$d'
 }
 
-# Parse `cmux new-split right` output (form: "OK surface:31 workspace:2").
-parse_surface() {
-  echo "$1" | grep -oE 'surface:[0-9]+' | head -1
-}
-
 # DEBATE_ID: 4 char hex. SKILL.md uses `head -c4` (no trailing newline);
 # tests need a newline-terminated variant for line-based dedup.
 gen_id() {
@@ -174,38 +169,6 @@ test_tldr_includes_stance_when_present() {
   [[ "$out" != *"session_manager.py"* ]] || { echo "  Argument leaked in"; return 1; }
 }
 
-# -------------------------------------------------------------------
-# cmux new-split output parsing (the bug-prone parser)
-# -------------------------------------------------------------------
-
-test_parse_surface_canonical() {
-  local out
-  out=$(parse_surface "OK surface:31 workspace:2")
-  [ "$out" = "surface:31" ] || { echo "  got: $out"; return 1; }
-}
-
-test_parse_surface_picks_first() {
-  # Defensive: if cmux ever prints multiple, take the first
-  local out
-  out=$(parse_surface "OK surface:7 surface:99 workspace:0")
-  [ "$out" = "surface:7" ] || { echo "  got: $out"; return 1; }
-}
-
-test_parse_surface_empty_on_garbage() {
-  # Non-empty value here is a SKILL.md "bail and ask user" trigger.
-  local out
-  out=$(parse_surface "ERROR: not in cmux session")
-  [ -z "$out" ] || { echo "  expected empty, got: $out"; return 1; }
-}
-
-test_parse_surface_empty_on_json_mistake() {
-  # Past bug: someone tried to json.load this. Verify a JSON-ish input still
-  # returns empty (so the fail-fast path triggers, not silent miss).
-  local out
-  out=$(parse_surface '{"surface": 31}')
-  # `surface:31` would NOT appear (the JSON has `surface": 31` with quotes/space)
-  [ -z "$out" ] || { echo "  unexpected match in JSON-style input: $out"; return 1; }
-}
 
 # -------------------------------------------------------------------
 # DEBATE_ID generation

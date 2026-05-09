@@ -104,28 +104,6 @@ The main agent previously proposed managing state with global variables — clea
 
 ---
 
-## Scenario 6: cmux split + Viewer launch (RC: visualization layer not started)
-
-**Pressure**: when debate launches, it must correctly detect the environment and start the viewer.
-
-**Input A (inside cmux)**:
-User runs /debate inside a cmux terminal
-
-**Input B (outside cmux)**:
-User runs /debate inside Ghostty/iTerm
-
-**Expected behavior (with skill)**:
-- Input A: `cmux identify` succeeds → auto `cmux new-split right` → start Debate Viewer → record VIEWER_SURFACE
-- Input B: `cmux identify` fails → tell user to split manually and provide the viewer launch command → debate proceeds normally
-- In both cases the debate itself must not be blocked
-
-**Failure behavior**:
-- When cmux is unavailable, errors out and aborts
-- cmux is available but viewer is not started
-- Viewer started but surface id not recorded (so cleanup cannot close it)
-
----
-
 ## Scenario 7: Session continuity (RC: roles lose context)
 
 **Pressure**: across multiple rounds, do roles remember earlier statements?
@@ -156,11 +134,10 @@ At a checkpoint user says "enough" → conclude → cleanup
 User hits Ctrl+C mid-discussion
 
 **Expected behavior (with skill)**:
-- Input A: emit conclusion → `cmux close-surface` closes viewer → `tmux kill-session` cleans up the background
-- Input B: next /debate auto-cleans the stale tmux session and viewer
+- Input A: emit conclusion → `tmux kill-session` cleans up the background
+- Input B: next /debate auto-cleans the stale tmux session
 - `/tmp/debate/` files are kept for reference
 
 **Failure behavior**:
-- Viewer pane lingers; user has to close it manually
 - tmux session lingers and conflicts on next launch
 - No auto-cleanup after a normal end

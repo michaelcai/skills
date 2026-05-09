@@ -64,7 +64,7 @@ test_smoke_round1_pipeline_with_fake_claude() {
   # Wait for the role to "finish"
   tmux wait-for "${DEBATE_ID}-role-a-r1" || { echo "  wait-for never signaled"; return 1; }
 
-  # The canned output must be in the file (the viewer reads from here)
+  # The canned output must be in the file
   [ -f "$DEBATE_DIR/role-a-r1.txt" ] || { echo "  output file not created"; return 1; }
   grep -q "Redis Pub/Sub does not guarantee" "$DEBATE_DIR/role-a-r1.txt" \
     || { echo "  output content missing"; return 1; }
@@ -150,27 +150,6 @@ test_smoke_multi_instance_isolation() {
   # Killing one must not affect the other
   tmux kill-session -t "$sess1"
   tmux has-session -t "$sess2" 2>/dev/null || { echo "  $sess2 died with $sess1"; return 1; }
-}
-
-# -------------------------------------------------------------------
-# 5. viewer venv path — `~/workspace/.pai/venvs/debate-viewer/` either
-#    exists (passes) or the activate script is the documented fallback.
-#    This is a soft check — venv may not exist on a fresh machine, but
-#    if it does, it must look correct.
-# -------------------------------------------------------------------
-
-test_smoke_viewer_venv_layout_if_present() {
-  local venv="$HOME/workspace/.pai/venvs/debate-viewer"
-  if [ ! -d "$venv" ]; then
-    echo "  SKIP: viewer venv not installed"
-    return 2
-  fi
-  [ -f "$venv/bin/activate" ] || { echo "  bash activate missing"; return 1; }
-  [ -f "$venv/bin/activate.fish" ] || { echo "  fish activate missing"; return 1; }
-  [ -x "$venv/bin/python" ] || { echo "  python binary missing"; return 1; }
-  # textual/rich must be importable
-  "$venv/bin/python" -c "import textual, rich" 2>/dev/null \
-    || { echo "  textual/rich not installed"; return 1; }
 }
 
 # -------------------------------------------------------------------
