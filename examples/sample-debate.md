@@ -18,34 +18,19 @@
 
 `agent-session doctor` reports `claude` and `opencode` available — multi-model ✓.
 
-The main agent assigns:
+The main agent assigns (Wildcard is mandatory; Role B is skipped because Role A's "broker reliability" angle covers the topic adequately):
 
 | Role | Backend | Family | Identity |
 |---|---|---|---|
 | Defender | claude | anthropic | Defender of the Pub/Sub proposal |
 | Role A (`role-a`) | opencode | openai | Engineer focused on message-broker reliability |
+| Wildcard | opencode | openai | Free-form divergent thinker (NOT scoped to a specific angle) |
 
-Spawned via:
-
-```bash
-DEBATE_DIR=/tmp/debate-a3f7
-SESSIONS_DIR=$DEBATE_DIR/sessions
-# (shared-context.md and per-role .md files written here — see SKILL.md §2.4)
-
-agent-session spawn --backend claude --role-id defender \
-  --prompt-file $DEBATE_DIR/defender-r1-full.md \
-  --state-dir $SESSIONS_DIR \
-  --system-prompt "You are the Defender. ..."
-
-agent-session spawn --backend opencode --role-id role-a \
-  --prompt-file $DEBATE_DIR/role-a-r1-full.md \
-  --state-dir $SESSIONS_DIR \
-  --system-prompt "You are an engineer focused on broker reliability. ..."
-```
+All three roles are spawned in parallel via agent-session's `spawn` verb (call shape: see [agent-session SKILL.md](../skills/agent-session/SKILL.md)). Each spawn carries its role-id, resolved backend, the role's first-turn prompt file, and a system prompt that includes the mandatory output format. Wall-clock ≈ slowest role's first-turn latency (~30s here, vs ~90s if sequential).
 
 ## Round 1 outputs
 
-`agent-session output --role-id defender --state-dir $SESSIONS_DIR`:
+Defender's reply (retrieved via the `output` verb):
 
 ```
 ## TL;DR
@@ -64,7 +49,7 @@ the user opening the app) refreshes any state. Streams becomes the right answer 
 there's a downstream consumer that *can't* tolerate gaps — but we don't have that consumer.
 ```
 
-`agent-session output --role-id role-a --state-dir $SESSIONS_DIR`:
+Role A's reply:
 
 ```
 ## TL;DR
@@ -84,29 +69,68 @@ But compared with silent message loss — where the user has no idea what happen
 that cost.
 ```
 
-**Moderator notes**: both stances are `add` (round 1 default). Disagreement is real: Defender argues "best-effort is OK for UX"; Role A argues "silent loss is unacceptable". Need to push to round 2.
+Wildcard's reply:
+
+```
+## TL;DR
+The framing assumes Redis is the right transport at all. SSE/WebSocket directly from each pod
+is cheaper, simpler, and side-steps the broker-reliability question entirely.
+[stance: add]
+
+## Argument
+We're optimizing the wrong layer. Notifications are user-facing — they live and die at the WebSocket
+session. Why route them through a pub/sub broker only to fan them back out to the same pod that
+holds the user's connection?
+
+Direct: each pod tracks its own connected users; cross-pod events go via a thin coordinator (or a
+DB row's `pg_notify`, since we already have Postgres). Removes Redis from the notification path,
+removes the entire "what if Redis loses messages" debate, and is fewer moving parts in production.
+The Streams-vs-Pub/Sub argument is a lateral move within the wrong architecture.
+```
+
+**Moderator notes**: stances are all `add` (round 1 default). Defender argues "best-effort is OK for UX"; Role A argues "silent loss is unacceptable"; Wildcard reframes — "you don't need a broker at all". Wildcard's contribution is a *second-axis* signal — orthogonal to the focused critics, exactly the role's purpose. Push to round 2.
 
 ## Round 2
 
-Moderator constructs incremental prompts (other role's TL;DR + this round's focus):
-
-`$DEBATE_DIR/defender-r2.md`:
-
-```markdown
-## Last round, other participants (TL;DR)
-### Role A
-Redis Pub/Sub does not guarantee delivery; horizontal scaling silently drops notifications.
-We should switch to Streams + consumer group.
-
-## Focus this round
-Are there real-world UX scenarios where a dropped notification causes harm beyond "user reloads"? Be specific.
-```
-
-Sent via:
+After round 1 finished, the moderator runs the **after-round step** (shell extracts each role's TL;DR straight to disk — these bytes never enter the moderator's assistant message):
 
 ```bash
-agent-session send --role-id defender --prompt-file $DEBATE_DIR/defender-r2.md \
-  --state-dir $SESSIONS_DIR
+mkdir -p $DEBATE_DIR/tldrs
+for r in defender role-a wildcard; do
+  agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" \
+    | sed -n '/^## TL;DR/,/^## /{/^## [^T]/q;p}' > $DEBATE_DIR/tldrs/$r.md
+done
+```
+
+Then the **pre-round step** assembles the shared `r2.md` from the on-disk TL;DRs (still no moderator-message bytes):
+
+```bash
+{
+  echo "## Last round, other participants (TL;DR)"
+  for r in defender role-a wildcard; do
+    echo; echo "### $r"; cat $DEBATE_DIR/tldrs/$r.md
+  done
+  echo; echo "## Focus this round"
+} > $DEBATE_DIR/r2.md
+```
+
+Now — and only now — the moderator appends a 4-line focus block. This is the **only** content from this round that lands in the moderator's own context:
+
+```bash
+cat >> $DEBATE_DIR/r2.md <<'EOF'
+- **Defender**: Are there real-world UX scenarios where a dropped notification causes harm beyond "user reloads"? Be specific.
+- **Role A**:   Defend the "Streams everywhere" claim against the cost objection (consumer-group ops, manual ack).
+- **Wildcard**: Pick whichever divergent angle gives the most leverage.
+EOF
+```
+
+Sent in parallel:
+
+```bash
+for r in defender role-a wildcard; do
+  agent-session send --role-id "$r" --prompt-file $DEBATE_DIR/r2.md --state-dir $SESSIONS_DIR &
+done
+wait
 ```
 
 Defender round-2 output:

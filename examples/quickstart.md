@@ -12,16 +12,19 @@ Expected:
 
 ```
 Detected backends:
-  ✓ claude     /usr/local/bin/claude
-  ✓ opencode   ~/.../oc-task
-  ✓ codex      /opt/homebrew/bin/codex
+  ✓ claude     /usr/local/bin/claude            family=anthropic  auth=anthropic-api
+  ✓ opencode   ~/.opencode/bin/opencode         family=openai     auth=openai-chatgpt
+  ✓ codex      /opt/homebrew/bin/codex          family=openai     auth=openai-chatgpt
 
 Available backends: 3
-Distinct model families: 2 (anthropic, openai)
+Distinct binary families: 2 (anthropic, openai)
+Distinct auth identities: 2 (anthropic-api, openai-chatgpt)
 Multi-model capability: ✓
 ```
 
 If `Multi-model capability: ✓`, you can run `/debate`. If not, install at least one non-Claude backend (`opencode` or `codex`) — see `skills/agent-session/references/backend-*.md`.
+
+The `auth=` column flags supply-chain identity collisions: two backends sharing the same auth (e.g. both `openai-chatgpt`) means the cross-family debate premise is notional — they hit the same vendor. `doctor` warns when collisions reduce the *real* family count below the *binary* family count.
 
 ## 2. Single-turn spawn
 
@@ -60,12 +63,15 @@ agent-session describe --role-id smoke --state-dir ./state
 {
   "role_id": "smoke",
   "backend": "claude",
-  "family": "anthropic",
+  "binary_family": "anthropic",
+  "model_family": "anthropic",
   "model": "haiku",
   "round_count": 1,
   "state": "active"
 }
 ```
+
+(`binary_family` is the CLI's static identity — `claude` always reports `anthropic`. `model_family` is per-model: opencode + an `anthropic/*` model would report `binary_family: openai`, `model_family: anthropic`. See `agent-session doctor` for the auth-identity column.)
 
 Cleanup:
 

@@ -100,7 +100,7 @@ SESSIONS_DIR="${DEBATE_DIR}/sessions"
 mkdir -p "$SESSIONS_DIR"
 ```
 
-`SESSIONS_DIR` is the `--state-dir` for every `agent-session` call. Cleanup is `rm -rf "$DEBATE_DIR"`.
+`SESSIONS_DIR` is the shared state directory passed to every `spawn` / `send` / `output` / `cleanup` call. Cleanup is `rm -rf "$DEBATE_DIR"`.
 
 #### 2.2 Backend preflight
 
@@ -176,7 +176,7 @@ P3. Main-agent assignment from the prefs pool:
                for perspective drift; fall back to any pool entry.
 ```
 
-**Model resolution** (after agent fixed): env var → prefs[*].model → `null` (omit `--model`).
+**Model resolution** (after agent fixed): env var → `prefs[*].model` → `null` (let the backend pick its default).
 
 Env vars: `DEBATE_<ROLE>_BACKEND` / `DEBATE_<ROLE>_MODEL`, where `<ROLE>` ∈ `DEFENDER` / `ROLE_A` / `ROLE_B` / `WILDCARD`.
 
@@ -231,7 +231,7 @@ Pick whichever divergent angle gives the most leverage on this proposal.
 
 Defender / Role A / Role B files follow the obvious shape: `## Your role`, `## Your examination focus`, `## Focus this round`. Compose them yourself.
 
-**Output format (mandatory, passed to every role via `--system-prompt`)**:
+**Output format (mandatory, passed to every role as their system prompt at spawn)**:
 
 ```
 ## TL;DR
@@ -254,32 +254,22 @@ Defender / Role A / Role B files follow the obvious shape: `## Your role`, `## Y
 
 #### 2.5 Spawn roles
 
-**Use `agent-session` (see ../agent-session/SKILL.md for full CLI).** Spawn every role **in parallel** — round-1 prompts are independent so the wall-clock is one role's latency, not four:
+For each role decided in §2.3, open a persistent session via the [agent-session](../agent-session/SKILL.md) skill's **`spawn`** verb. The verb's call shape is owned by agent-session; what debate provides:
 
-```bash
-for r in defender role-a role-b wildcard; do
-  [ -f "$DEBATE_DIR/$r-r1-full.md" ] || continue   # role-b is topic-conditional
-  agent-session spawn \
-    --backend "$(eval echo \$${r//-/_}_BACKEND | tr a-z A-Z)" --role-id "$r" \
-    --prompt-file "$DEBATE_DIR/$r-r1-full.md" \
-    --state-dir "$SESSIONS_DIR" \
-    --system-prompt "You are the $r in a technical debate. $FORMAT_RULE" \
-    ${DEFENDER_MODEL:+--model "$DEFENDER_MODEL"} &
-done
-wait
-```
+- the role's `(backend, model)` from §2.3
+- the role's first-turn prompt from §2.4
+- a system prompt of form `"You are the <role> in a technical debate. $FORMAT_RULE"`
+- a single shared state directory for the whole debate (so cleanup is one `rm -rf`)
 
-(If you prefer one explicit invocation per role for clarity, that's fine too — the resolved `(backend, model)` for each came from §2.3.)
+**Run all spawns in parallel** — round-1 prompts are independent, so wall-clock equals the slowest role's latency. Skip `role-b` when §2.3 made it topic-conditional. After spawn, each role's first-turn reply is retrievable via the `output` verb.
 
-After spawn, round-1 output is at `$SESSIONS_DIR/<role-id>/output/r0.txt`.
-
-For tmux *split-pane visualization* (not for parallelism — the loop above already parallelizes): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
+For tmux *split-pane visualization* (not for parallelism — concurrency comes from `& ... wait`): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
 ### Step 3: Discuss
 
 #### Round 1
 
-Read each role's `r0` output via `agent-session output --role-id <id> --state-dir "$SESSIONS_DIR"`. Record divergence and consensus. Treat the Wildcard's contribution as a *second-axis* signal — it may surface concerns orthogonal to the focused critics; don't force-merge.
+For each role, retrieve its first-turn reply via agent-session's `output` verb. Record divergence and consensus. Treat the Wildcard's contribution as a *second-axis* signal — it may surface concerns orthogonal to the focused critics; don't force-merge.
 
 #### Round N (subsequent)
 
@@ -287,75 +277,41 @@ Build an incremental prompt: only other roles' previous-round TL;DRs + this roun
 
 **[MUST] One shared prompt file per round, assembled by shell — not by quoting role outputs into the moderator's assistant message.** This is the single biggest source of context bloat: dumping every role's TL;DR into the moderator's message stream every round adds ~100 tokens × M_roles × N_rounds. The moderator should never need to read or re-quote a TL;DR to assemble the next round.
 
-##### After-round step (runs immediately after every `wait` finishes)
+##### After-round step (runs immediately after every round finishes)
 
-Extract each role's TL;DR into a per-role file. The moderator does **not** read the output — `sed` writes straight to disk:
+For each active role, fetch its latest reply via agent-session's `output` verb, pipe it through `sed` to keep only the `## TL;DR ... [stance: ...]` block, and redirect to `$DEBATE_DIR/tldrs/<role-id>.md`. **The moderator never reads the output into its own message** — the pipe goes verb → `sed` → disk.
 
-```bash
-mkdir -p "$DEBATE_DIR/tldrs"
-for r in defender role-a role-b wildcard; do
-  agent-session describe --role-id "$r" --state-dir "$SESSIONS_DIR" >/dev/null 2>&1 || continue
-  agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" \
-    | sed -n '/^## TL;DR/,/^## /{/^## [^T]/q;p}' \
-    > "$DEBATE_DIR/tldrs/$r.md"
-done
+The extractor is debate-specific (it depends on the §2.4 mandatory output format):
+
+```
+sed -n '/^## TL;DR/,/^## /{/^## [^T]/q;p}'
 ```
 
-Each `tldrs/<role>.md` is overwritten each round with the latest TL;DR. **Don't read these files into the moderator's message** — they're for the *next* round's prompt assembly.
+Each `tldrs/<role>.md` is overwritten each round with the latest TL;DR. These files are inputs to the next round's prompt assembly — not for the moderator to read.
 
 ##### Pre-round step (assembling rN.md without reading TL;DRs)
 
-```bash
-N=2  # next round number
-{
-  echo "## Last round, other participants (TL;DR)"
-  for r in defender role-a role-b wildcard; do
-    [ -f "$DEBATE_DIR/tldrs/$r.md" ] || continue
-    echo
-    echo "### $r"
-    cat "$DEBATE_DIR/tldrs/$r.md"
-  done
-  echo
-  echo "## Focus this round"
-} > "$DEBATE_DIR/r${N}.md"
-```
+Concatenate `tldrs/*.md` into a single shared `$DEBATE_DIR/rN.md` under a `## Last round, other participants (TL;DR)` header (one `### <role-id>` subsection each). Pure shell — `cat`, no Read tool. Then append a `## Focus this round` block with one bullet per role (1-2 lines each).
 
-Now the moderator appends only a **4-line focus block** — that is the ONLY content from this round that lands in the moderator's assistant message:
+The focus bullets are the **only** content from this round that the moderator types into its own assistant message — typically ~4 lines.
 
-```bash
-cat >> "$DEBATE_DIR/r${N}.md" <<'EOF'
-- **Defender**: {1-2 line focus}
-- **Role A**:   {1-2 line focus}
-- **Role B**:   {1-2 line focus}
-- **Wildcard**: {1-2 line focus}
-EOF
-```
+##### Send (parallel)
 
-Pass the SAME file to every `agent-session send` — each role sees the full TL;DR block plus all four focus lines (the role can self-select its own line).
+Pass the SAME `rN.md` to every role via agent-session's `send` verb, dispatched **in parallel**. Sequential within-round dispatch is not required — the prompt only references round N-1, so there's no in-round dialogue — and roughly doubles wall-clock.
 
-Send **in parallel** — every role receives the same file and replies independently. Sequential within-round dispatch is **not** required (the prompt only references round N-1, so there's no in-round dialogue) and roughly doubles wall-clock.
+If you want Defender to rebut this-round critic arguments, do it as an **optional follow-up half-round** (one extra `send` to Defender after collecting the others' r_N), not by ordering the main round. Reserve for the round just before a checkpoint.
 
-```bash
-for r in defender role-a role-b wildcard; do
-  agent-session describe --role-id "$r" --state-dir "$SESSIONS_DIR" >/dev/null 2>&1 || continue
-  agent-session send --role-id "$r" --prompt-file "$DEBATE_DIR/r${N}.md" --state-dir "$SESSIONS_DIR" &
-done
-wait
-```
-
-If you specifically want Defender to rebut this-round critic arguments, do it as an **optional follow-up half-round** (one extra `send` to defender after collecting Role A/B/Wildcard's r_N), not by ordering the main round. Reserve for the round just before a checkpoint, not every round.
-
-For tmux split panes (visualization, not parallelism — the loop above is already parallel): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
+For tmux split panes (visualization, not parallelism — sends already run concurrently): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
 #### [MUST] Read strategy (token saving)
 
 The main agent has a context window. Each round's full Argument bodies × N rounds × M roles will exhaust it. Three rules:
 
-**(a) Inter-round TL;DRs never enter the moderator's message.** The After-round step above pipes `agent-session output | sed` straight to `tldrs/<role>.md` and the Pre-round step `cat`s those files into `rN.md`. The moderator's only inter-round contribution to its own context is the 4-line focus block.
+**(a) Inter-round TL;DRs never enter the moderator's message.** The After-round step pipes the `output` verb's result through `sed` straight to `tldrs/<role>.md`; the Pre-round step `cat`s those files into `rN.md`. The moderator's only inter-round contribution to its own context is the 4-line focus block.
 
 **(b) Read TL;DRs only at the every-3-round checkpoint.** When you reach a checkpoint, *then* the moderator may `cat $DEBATE_DIR/tldrs/*.md` once to synthesize the consensus/divergence block. Read the full Argument only when the user asks or when the stance distribution warrants verification.
 
-**(c) Never re-quote role outputs into the assistant message.** When a tool result surfaced a 200-line role output, do NOT re-include it verbatim "to show the user what each said" — the user can `cat` the file themselves. The role's session holds its full history in agent-session — the moderator never needs to repeat anything.
+**(c) Never re-quote role outputs into the assistant message.** When a tool result surfaced a 200-line role output, do NOT re-include it verbatim "to show the user what each said" — the user can `cat` the file themselves. Each role's session already holds its full history (agent-session owns that) — the moderator never needs to repeat anything.
 
 #### [MUST] False-consensus guard
 
@@ -437,15 +393,7 @@ This means the moderator's context grows by one ~15-line summary per checkpoint,
 
 [MUST] Runs automatically — don't wait for the user.
 
-```bash
-# 1. Close every spawned role's session
-for role in defender role-a role-b wildcard; do
-  agent-session cleanup --role-id "$role" --state-dir "$SESSIONS_DIR" 2>/dev/null || true
-done
-
-# 2. Wipe the debate workspace
-rm -rf "$DEBATE_DIR"
-```
+For every role spawned in §2.5, terminate its session via agent-session's `cleanup` verb. Then `rm -rf "$DEBATE_DIR"`. Cleanup must be idempotent (calling it twice is a no-op) — ignore "session not found" errors.
 
 For tmux split mode see [`references/parallel-tmux.md`](./references/parallel-tmux.md) for its analogous cleanup.
 

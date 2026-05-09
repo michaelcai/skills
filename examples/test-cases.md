@@ -65,7 +65,7 @@ bash ~/.michaelcai-skills/skills/debate/tests/run-unit.sh
 
 **Pass**:
 - `agent-session`: `Result: 20 passed, 0 failed`
-- `debate`: `Result: 24 passed, 0 failed`
+- `debate`: `Result: 20 passed, 0 failed`
 
 **Troubleshooting**:
 - Any failure → file a bug at https://github.com/michaelcai/skills/issues with the failing assertion's name. Tests are pure-bash + python3-stdlib, so failures usually mean a structural / refactor regression, not an environment issue.
@@ -253,8 +253,8 @@ In a Claude Code session, ensure a recent agent message contains a proposal/opin
 9. Main agent runs `agent-session cleanup` for every role (defender / role-a / [role-b] / wildcard); `/tmp/debate-*` is removed.
 
 **Troubleshooting**:
-- Step 5 stance tag missing → the `--system-prompt` (FORMAT_RULE) is not being passed; check the spawn command in step 2.6 of SKILL.md.
-- Step 6 wildcard sounds like Role A → wildcard system prompt is missing the "free-form, NOT scoped to a specific examination angle" instruction; check §2.4 wildcard-r1.md template + §2.6 wildcard spawn.
+- Step 5 stance tag missing → the system prompt (FORMAT_RULE) is not being passed at spawn; check §2.5 of SKILL.md.
+- Step 6 wildcard sounds like Role A → wildcard system prompt is missing the "free-form, NOT scoped to a specific examination angle" instruction; check §2.4 wildcard-r1.md template + §2.5 wildcard spawn.
 
 ### C3. User preference via env vars
 
