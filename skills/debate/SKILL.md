@@ -213,9 +213,16 @@ P3. Main-agent assignment (from the prefs pool)
     Role A   → first agent in the pool whose family ≠ Defender's family,
                OR if no different-family entry exists, the next pool
                entry (same family, different agent or model).
-    Role B   → main agent's call: typically the next pool entry not
-               already assigned. May be skipped if pool has only 2 entries
-               and a 2-role debate suffices.
+    Role B   → optional, decided by **topic need** — include if the
+               challenge has a second distinct examination angle
+               (e.g. one role audits security, the other audits
+               cost). Do NOT skip just because pool is small; same
+               agent with a different angle is still useful.
+    Wildcard → always present. Free-form divergent thinker — its
+               value comes from NOT being scoped to a specific
+               examination angle. Prefer a cross-family entry
+               for maximum perspective drift; fall back to any
+               pool entry (same family different model also works).
 ```
 
 **Model resolution** (after the agent is fixed):
@@ -233,6 +240,7 @@ Env var reference (used in P2 / model resolution):
 | `DEBATE_DEFENDER_BACKEND` / `DEBATE_DEFENDER_MODEL` | Override the Defender |
 | `DEBATE_ROLE_A_BACKEND`   / `DEBATE_ROLE_A_MODEL`   | Override Role A |
 | `DEBATE_ROLE_B_BACKEND`   / `DEBATE_ROLE_B_MODEL`   | Override Role B (if used) |
+| `DEBATE_WILDCARD_BACKEND` / `DEBATE_WILDCARD_MODEL` | Override the Wildcard role |
 
 ##### Self-family detection (for P3 Defender pick)
 
@@ -252,12 +260,15 @@ Before spawning, the main agent **must** print its decision and wait for the use
 
 ```
 Debate assignment:
-  Defender = claude   (default model)
-  Role A   = opencode (default model)
-  [Role B  = codex    (gpt-5.4-mini)]
+  Defender = claude   (default model)        — defends the proposal
+  Role A   = opencode (default model)        — examines: <angle>
+  [Role B  = codex    (gpt-5.4-mini)]        — examines: <second angle>
+  Wildcard = opencode (anthropic/claude-opus) — free-form divergent
 Pool source: ~/.config/agents/debate/prefs.json
 Begin? (Y/n)
 ```
+
+Each role includes a one-line "what it examines" so the user can sanity-check before spending tokens.
 
 If the assignment ended up single-family, append a one-liner above `Begin?`:
 
@@ -267,16 +278,17 @@ Note: all roles share family "anthropic" — debate may converge fast.
 
 #### 2.3.2 Dynamic role generation
 
-Independent of backend assignment, the main agent constructs role identities:
+Independent of backend assignment, the main agent constructs role identities. A debate has 3-4 roles total:
 
-**Defender** — defends the original proposal.
+**Defender (always)** — defends the original proposal. Acknowledges genuine flaws and proposes improvements rather than holding stubbornly.
 
-**Dynamic role(s) (1-2)** — each must have:
-- Identity description specific to this discussion (e.g. "focus on token refresh logic security in this JWT proposal")
-- Examination focus
-- Stance leaning (optional)
+**Role A (always)** — first focused critic. Identity must be specific (e.g. "audits the token refresh logic for replay attacks in this JWT proposal"). Generic identities ("security expert", "performance engineer") are forbidden.
 
-**[MUST]** Role descriptions must be specific to this discussion. Generic descriptions like "security expert" or "performance engineer" are forbidden.
+**Role B (optional, decided by topic)** — second focused critic, included only when the challenge has a clearly distinct second examination angle from Role A. If a second angle would just paraphrase Role A, skip Role B. Same specificity rule applies.
+
+**Wildcard (always)** — free-form divergent role. **Do NOT** scope it to an examination angle. Its job is to bring perspectives the focused critics will likely miss: second-order effects, contrarian framings, analogies from adjacent domains, fundamental questions about premises, "what if the proposal is solving the wrong problem". Wildcard's TL;DR + Argument may legitimately point to issues outside the original challenge — that's the whole point.
+
+**[MUST]** Role A / Role B identities must be specific to this discussion. Wildcard does not need (and should not be given) a narrow examination focus.
 
 If P1 / P2 / P3 produced a single-family assignment (e.g. user pinned all roles to claude), warn the user once at decision-print time but proceed if they confirm. The stance-tag false-consensus guard still works in single-family setups; the user trades cross-family disagreement for whatever motivated their pinning.
 
@@ -308,7 +320,7 @@ If the original proposal genuinely has flaws, acknowledge them and propose impro
 (Round 1 = comprehensive response to the challenge; subsequent rounds set by the moderator)
 ```
 
-**Dynamic role special instructions** (`$DEBATE_DIR/role-a-r1.md`):
+**Dynamic critic role instructions** (`$DEBATE_DIR/role-a-r1.md`, also role-b-r1.md):
 
 ```markdown
 ## Your role
@@ -322,6 +334,26 @@ If the original proposal genuinely has flaws, acknowledge them and propose impro
 
 ## Focus this round
 (Round 1 = full evaluation from your examination focus)
+```
+
+**Wildcard role instructions** (`$DEBATE_DIR/wildcard-r1.md`):
+
+```markdown
+## Your role
+Divergent thinker. You are NOT scoped to a specific examination angle.
+
+## Your job
+Bring perspectives the other roles will miss. Examples (pick what fits — do NOT do all):
+- Question the proposal's premises (is this even the right problem?)
+- Second-order or systemic effects (what does this incentivize / break elsewhere?)
+- Contrarian framings (what argues for the opposite approach?)
+- Analogies from adjacent domains (where has this pattern played out before?)
+- Failure modes nobody asked about (what fails silently? in 2 years? at 10× scale?)
+
+You may legitimately raise issues OUTSIDE the user's stated challenge — that is the value of this role. Do not try to be balanced; bring what's not yet on the table.
+
+## Focus this round
+(Round 1 = pick whichever divergent angle gives the most leverage on this proposal.)
 ```
 
 **Output format (mandatory, shared by all roles, passed via `--system-prompt`)**:
@@ -350,9 +382,10 @@ If the original proposal genuinely has flaws, acknowledge them and propose impro
 For each role, build the full first-turn prompt by concatenating shared context + role instructions:
 
 ```bash
-cat "$DEBATE_DIR/shared-context.md" "$DEBATE_DIR/defender-r1.md" > "$DEBATE_DIR/defender-r1-full.md"
-cat "$DEBATE_DIR/shared-context.md" "$DEBATE_DIR/role-a-r1.md"   > "$DEBATE_DIR/role-a-r1-full.md"
-# (and similarly for role-b if used)
+cat "$DEBATE_DIR/shared-context.md" "$DEBATE_DIR/defender-r1.md"  > "$DEBATE_DIR/defender-r1-full.md"
+cat "$DEBATE_DIR/shared-context.md" "$DEBATE_DIR/role-a-r1.md"    > "$DEBATE_DIR/role-a-r1-full.md"
+cat "$DEBATE_DIR/shared-context.md" "$DEBATE_DIR/wildcard-r1.md"  > "$DEBATE_DIR/wildcard-r1-full.md"
+# (and role-b if topic warrants a second focused critic)
 ```
 
 #### 2.6 Spawn all roles
@@ -364,11 +397,13 @@ The main agent has already resolved the (backend, model) for each role in §2.3 
 ```bash
 FORMAT_RULE='Reply in English. Required output format: first "## TL;DR" (2-3 sentences with the core view), with a single line "[stance: hold/concede/add]" at the end of the TL;DR (always "add" in round 1), then "## Argument" (150-300 words, citing specific code/technical detail). No preamble.'
 
-# DEFENDER_BACKEND / DEFENDER_MODEL / ROLE_A_BACKEND / ... already resolved in §2.3.
+# <ROLE>_BACKEND / <ROLE>_MODEL already resolved in §2.3 for: defender, role_a, [role_b], wildcard.
 defender_model_flag=()
 [ -n "${DEFENDER_MODEL:-}" ] && defender_model_flag=(--model "$DEFENDER_MODEL")
 role_a_model_flag=()
 [ -n "${ROLE_A_MODEL:-}" ] && role_a_model_flag=(--model "$ROLE_A_MODEL")
+wildcard_model_flag=()
+[ -n "${WILDCARD_MODEL:-}" ] && wildcard_model_flag=(--model "$WILDCARD_MODEL")
 
 agent-session spawn \
   --backend "$DEFENDER_BACKEND" --role-id defender \
@@ -384,7 +419,14 @@ agent-session spawn \
   --system-prompt "You are {Role A identity}. $FORMAT_RULE" \
   "${role_a_model_flag[@]}"
 
-# (and role-b similarly with ROLE_B_BACKEND / ROLE_B_MODEL)
+agent-session spawn \
+  --backend "$WILDCARD_BACKEND" --role-id wildcard \
+  --prompt-file "$DEBATE_DIR/wildcard-r1-full.md" \
+  --state-dir "$SESSIONS_DIR" \
+  --system-prompt "You are the Wildcard role — a divergent thinker not bound to a specific examination angle. $FORMAT_RULE" \
+  "${wildcard_model_flag[@]}"
+
+# (and role-b similarly with ROLE_B_BACKEND / ROLE_B_MODEL, only if topic warranted it)
 ```
 
 After every `spawn` succeeds, the first-round assistant message is at `$SESSIONS_DIR/<role-id>/output/r0.txt`.
@@ -398,9 +440,11 @@ Main agent reads each role's first-round output:
 ```bash
 agent-session output --role-id defender --state-dir "$SESSIONS_DIR"
 agent-session output --role-id role-a   --state-dir "$SESSIONS_DIR"
+agent-session output --role-id wildcard --state-dir "$SESSIONS_DIR"
+# and role-b if spawned
 ```
 
-Record divergence and consensus points.
+Record divergence and consensus points. Treat the Wildcard's contribution as a *second-axis* signal — it may surface concerns orthogonal to Role A/B's examination axes; don't try to force-merge them.
 
 #### Round N (subsequent rounds)
 
@@ -420,18 +464,13 @@ Build a small incremental prompt for each role — **only** other roles' TL;DR f
 {focus chosen by the moderator}
 ```
 
-Send sequentially: Role A → Role B → Defender (Defender speaks last so it can respond to all).
+Send sequentially: Role A → Role B (if any) → Wildcard → Defender (Defender speaks last so it can respond to all).
 
 ```bash
-agent-session send \
-  --role-id role-a \
-  --prompt-file "$DEBATE_DIR/role-a-rN.md" \
-  --state-dir "$SESSIONS_DIR"
-
-agent-session send \
-  --role-id defender \
-  --prompt-file "$DEBATE_DIR/defender-rN.md" \
-  --state-dir "$SESSIONS_DIR"
+agent-session send --role-id role-a   --prompt-file "$DEBATE_DIR/role-a-rN.md"   --state-dir "$SESSIONS_DIR"
+# agent-session send --role-id role-b ... if spawned
+agent-session send --role-id wildcard --prompt-file "$DEBATE_DIR/wildcard-rN.md" --state-dir "$SESSIONS_DIR"
+agent-session send --role-id defender --prompt-file "$DEBATE_DIR/defender-rN.md" --state-dir "$SESSIONS_DIR"
 ```
 
 Read each role's new output:
@@ -465,7 +504,7 @@ Each role's session holds the full history in agent-session — the moderator ne
 
 ```bash
 # Extract stance tags from this round across all roles
-for r in defender role-a role-b; do
+for r in defender role-a role-b wildcard; do
   agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" 2>/dev/null
 done | grep -hoE '\[stance: (hold|concede|add)\]'
 ```
@@ -519,7 +558,8 @@ Wait for the user's response:
 ### Key arguments
 - Defender's view: {...}
 - {Role A}'s view: {...}
-- {Role B}'s view: {...}
+- [{Role B}'s view: {...}]
+- Wildcard's divergent take: {...}
 
 ### Unresolved divergence (if any)
 - {...}
@@ -529,7 +569,7 @@ Wait for the user's response:
 
 ```bash
 # Close every spawned role's session and delete its state
-for role in defender role-a role-b; do
+for role in defender role-a role-b wildcard; do
   agent-session cleanup --role-id "$role" --state-dir "$SESSIONS_DIR" 2>/dev/null || true
 done
 

@@ -243,17 +243,18 @@ In a Claude Code session, ensure a recent agent message contains a proposal/opin
 
 **Pass criteria** (end-to-end):
 1. Main agent presents context confirmation (Original proposal, Challenge, Planned participants). Confirm.
-2. Main agent runs `agent-session doctor` and verifies multi-model.
-3. Main agent spawns at least 2 roles using **2 distinct backend families** (e.g. claude + opencode/codex).
+2. Main agent runs `agent-session doctor` (informational) and loads `prefs.json`.
+3. Main agent prints the §2.3.1 decision block listing **at minimum** Defender + Role A + Wildcard, each with a one-line "examines …" or "free-form divergent". Role B is included only if the topic justifies a second focused angle.
 4. Round-1 outputs are visible (or polled via `agent-session output --role-id <name>`).
 5. Each role's output has the structure: `## TL;DR ... [stance: <hold|concede|add>] ... ## Argument ...`. Round-1 stances are all `add`.
-6. After 3 rounds, main agent presents a **checkpoint** (Consensus / Divergence / Moderator judgment / You decide).
-7. Say "enough"; main agent produces a **conclusion** with key arguments.
-8. Main agent runs `agent-session cleanup` for every role; `/tmp/debate-*` is removed.
+6. Wildcard's argument legitimately raises something OUTSIDE the user's stated challenge — that's the role's whole purpose. If wildcard reads like another focused critic, the system prompt is probably wrong.
+7. After 3 rounds, main agent presents a **checkpoint** (Consensus / Divergence / Moderator judgment / You decide).
+8. Say "enough"; main agent produces a **conclusion** with key arguments including a "Wildcard's divergent take" line.
+9. Main agent runs `agent-session cleanup` for every role (defender / role-a / [role-b] / wildcard); `/tmp/debate-*` is removed.
 
 **Troubleshooting**:
-- Step 3 fails with "≥2 distinct families" rule even though `doctor` shows ✓ → an env var (`DEBATE_*_BACKEND`) may be forcing all roles to one family. Check `env | grep DEBATE_`.
 - Step 5 stance tag missing → the `--system-prompt` (FORMAT_RULE) is not being passed; check the spawn command in step 2.6 of SKILL.md.
+- Step 6 wildcard sounds like Role A → wildcard system prompt is missing the "free-form, NOT scoped to a specific examination angle" instruction; check §2.4 wildcard-r1.md template + §2.6 wildcard spawn.
 
 ### C3. User preference via env vars
 
