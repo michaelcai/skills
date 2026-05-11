@@ -178,7 +178,13 @@ class Driver(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def send(self, role_id: str, prompt_file: str, state_dir: Optional[str]) -> None: ...
+    def send(
+        self,
+        role_id: str,
+        prompt_file: str,
+        state_dir: Optional[str],
+        timeout: Optional[int],
+    ) -> None: ...
 
     @abstractmethod
     def status(
@@ -278,7 +284,7 @@ class ClaudeDriver(Driver):
         meta["state"] = "active"
         write_meta(role_id, state_dir, meta)
 
-    def send(self, role_id, prompt_file, state_dir):
+    def send(self, role_id, prompt_file, state_dir, timeout):
         sd = session_dir(role_id, state_dir)
         meta = read_meta(role_id, state_dir)
         if not meta:
@@ -289,7 +295,7 @@ class ClaudeDriver(Driver):
         n = meta["round_count"]  # next round index
         rN_in = sd / "input" / f"r{n}.md"
         shutil.copy(prompt_file, rN_in)
-        t = resolve_timeout(meta_timeout=meta.get("timeout"))
+        t = resolve_timeout(override=timeout, meta_timeout=meta.get("timeout"))
 
         cmd = ["claude", "-p", "--resume", meta["sid"]]
         if meta.get("model") and meta["model"] != "default":
@@ -520,7 +526,7 @@ class OpencodeDriver(Driver):
         meta["state"] = "active"
         write_meta(role_id, state_dir, meta)
 
-    def send(self, role_id, prompt_file, state_dir):
+    def send(self, role_id, prompt_file, state_dir, timeout):
         sd = session_dir(role_id, state_dir)
         meta = read_meta(role_id, state_dir)
         if not meta:
@@ -535,6 +541,7 @@ class OpencodeDriver(Driver):
         model = meta.get("model")
         if model == "default":
             model = None
+        effective_timeout = timeout if timeout is not None else meta.get("timeout")
         try:
             _, text = self._run(
                 role_id,
@@ -544,7 +551,7 @@ class OpencodeDriver(Driver):
                 model=model,
                 cwd=meta.get("cwd"),
                 yolo=meta.get("yolo", False),
-                timeout=meta.get("timeout"),
+                timeout=effective_timeout,
             )
         except RuntimeError as e:
             meta["state"] = "error"
@@ -697,7 +704,7 @@ class CodexDriver(Driver):
         meta["state"] = "active"
         write_meta(role_id, state_dir, meta)
 
-    def send(self, role_id, prompt_file, state_dir):
+    def send(self, role_id, prompt_file, state_dir, timeout):
         sd = session_dir(role_id, state_dir)
         meta = read_meta(role_id, state_dir)
         if not meta:
@@ -711,7 +718,7 @@ class CodexDriver(Driver):
         rN_out = sd / "output" / f"r{n}.txt"
 
         cwd = Path(meta.get("cwd") or self._session_cwd(role_id, state_dir))
-        t = resolve_timeout(meta_timeout=meta.get("timeout"))
+        t = resolve_timeout(override=timeout, meta_timeout=meta.get("timeout"))
 
         # send: `codex exec resume` does NOT accept --cd; use subprocess cwd= so that
         # `--last` resolves to the session created in this exact directory by spawn.
@@ -1000,7 +1007,25 @@ def cmd_send(args) -> int:
         print(f"session not found: {args.role_id}", file=sys.stderr)
         return 2
     with lock(args.role_id, args.state_dir):
-        drv.send(args.role_id, args.prompt_file, args.state_dir)
+        # --force: recover from state=error (typically timeout). Move meta.error
+        # aside to meta.last_error for debugging and flip state back to active so
+        # driver.send() proceeds. The send itself may still fail (it then re-marks
+        # state=error), but the user got an explicit retry attempt.
+        if args.force:
+            meta = read_meta(args.role_id, args.state_dir)
+            if meta and meta.get("state") not in (None, "active"):
+                if meta.get("error"):
+                    meta["last_error"] = meta.pop("error")
+                meta["state"] = "active"
+                write_meta(args.role_id, args.state_dir, meta)
+        # --timeout: persist into meta so subsequent sends also inherit the new
+        # ceiling. Without this, raising the ceiling for one send would not stick.
+        if args.timeout is not None:
+            meta = read_meta(args.role_id, args.state_dir)
+            if meta:
+                meta["timeout"] = args.timeout
+                write_meta(args.role_id, args.state_dir, meta)
+        drv.send(args.role_id, args.prompt_file, args.state_dir, args.timeout)
     return 0
 
 
@@ -1117,6 +1142,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--role-id", "--session-id", dest="role_id", required=True)
     p_send.add_argument("--prompt-file", required=True)
     p_send.add_argument("--state-dir")
+    p_send.add_argument("--timeout", type=int,
+                        help="override the ceiling for this send AND persist into meta.json so subsequent sends inherit it. Priority: this flag > meta-persisted (from spawn) > $AGENT_SESSION_TIMEOUT > default 1800.")
+    p_send.add_argument("--force", action="store_true",
+                        help="recover a session stuck in state=error (typically from a previous timeout). Moves meta.error to meta.last_error and re-attempts the send. The retry may still fail; that's fine — you get an explicit attempt instead of being permanently blocked.")
 
     p_status = sub.add_parser(
         "status",

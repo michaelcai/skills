@@ -170,7 +170,15 @@ Sends a follow-up turn on an existing session.
 agent-session send --role-id role-a --prompt-file r3.md
 ```
 
-stdout: nothing on success; caller reads via `output --round N`. `send` reads the timeout persisted at `spawn` time from `meta.json`; override only at `spawn`.
+stdout: nothing on success; caller reads via `output --round N`.
+
+| Arg | Required | Notes |
+|---|---|---|
+| `--role-id` / `--session-id` | yes | Existing session identifier |
+| `--prompt-file` | yes | Path to this turn's prompt |
+| `--state-dir` | no | Same value used at `spawn` |
+| `--timeout` | no | Override the ceiling for this send AND persist it back to `meta.json` so subsequent sends inherit. Priority: `--timeout` > meta-persisted (from spawn or a previous `send --timeout`) > `$AGENT_SESSION_TIMEOUT` > 1800s. |
+| `--force` | no | Recover a session stuck in `state=error` (typically from a previous timeout). Moves `meta.error` aside to `meta.last_error` and re-attempts. The retry may still fail — that's fine, you get an explicit attempt instead of being permanently blocked. |
 
 ### Timeout
 

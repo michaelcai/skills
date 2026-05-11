@@ -251,6 +251,43 @@ to_val=$(python3 -c "import json;print(json.load(open('$TO_DIR/slow1/meta.json')
 assert_eq "$to_val" "1" "meta.timeout persists --timeout value (1)"
 
 echo ""
+echo "=== send: --timeout / --force flags exposed and honored ==="
+
+"$AS" send --help 2>&1 | grep -q -- "--timeout"
+assert_rc $? 0 "send --help mentions --timeout"
+
+"$AS" send --help 2>&1 | grep -q -- "--force"
+assert_rc $? 0 "send --help mentions --force"
+
+# Case: send --force on state=error session recovers state before driver attempt.
+# We can verify the state transition by inspecting meta.json after the call,
+# without needing the send to succeed end-to-end (driver will fail because the
+# backend "session" never existed — but meta.last_error must be set + meta.error
+# must be cleared by the recovery step).
+SEND_DIR="$TMPDIR_BASE/send-flags"
+mkdir -p "$SEND_DIR/stuck"
+cat > "$SEND_DIR/stuck/meta.json" <<EOF
+{"backend":"claude","model":"default","sid":"fake-sid","round_count":2,"state":"error","error":"timeout after 1s at round 1","timeout":1,"yolo":false,"cwd":null}
+EOF
+mkdir -p "$SEND_DIR/stuck/input" "$SEND_DIR/stuck/output"
+
+# Without --force: blocked
+out=$(PATH="$FAKE_BIN:$PATH" "$AS" send --role-id stuck \
+        --prompt-file "$TMPDIR_BASE/p.md" --state-dir "$SEND_DIR" 2>&1)
+rc=$?
+assert_contains "$out" "session not active" "send without --force on state=error reports 'session not active'"
+assert_rc $rc 1 "send without --force on state=error exits non-zero"
+
+# With --force --timeout 1: state cleaned + retry attempted (fails again because fake binary sleeps 30s past timeout=1)
+out=$(PATH="$FAKE_BIN:$PATH" "$AS" send --role-id stuck \
+        --prompt-file "$TMPDIR_BASE/p.md" --state-dir "$SEND_DIR" \
+        --force --timeout 1 2>&1)
+last_err=$(python3 -c "import json;print(json.load(open('$SEND_DIR/stuck/meta.json')).get('last_error',''))")
+assert_contains "$last_err" "timeout after 1s at round 1" "send --force moved old meta.error to meta.last_error"
+to_val=$(python3 -c "import json;print(json.load(open('$SEND_DIR/stuck/meta.json'))['timeout'])")
+assert_eq "$to_val" "1" "send --timeout persists value back to meta"
+
+echo ""
 echo "=== spawn duplicate without --force ==="
 
 mkdir -p "$SP_DIR/exists"
