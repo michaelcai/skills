@@ -64,6 +64,22 @@ out=$("$AS" --help 2>&1)
 assert_contains "$out" "doctor" "help lists doctor"
 assert_contains "$out" "spawn" "help lists spawn"
 assert_contains "$out" "cleanup" "help lists cleanup"
+assert_contains "$out" "run" "help lists run"
+
+# --session-id alias works where --role-id is accepted.
+out=$(
+  "$AS" describe --session-id ghost 2>&1
+)
+assert_contains "$out" "session not found" "describe accepts --session-id"
+
+# run validates required args and unknown backends.
+"$AS" run --prompt-file /tmp/x >/dev/null 2>&1
+assert_rc $? 2 "run without --backend exits 2"
+
+out=$("$AS" run --backend frobnicate --prompt-file /tmp/x 2>&1)
+rc=$?
+assert_rc $rc 2 "run unknown backend exits 2"
+assert_contains "$out" "unknown backend" "run unknown backend names it"
 
 echo ""
 echo "=== doctor ==="

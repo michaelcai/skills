@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """agent-session: persistent multi-turn LLM session abstraction over heterogeneous backend CLIs.
 
-Verbs: doctor, list-backends, describe, spawn, send, status, output, tldr, cleanup.
+Verbs: doctor, list-backends, describe, spawn, run, send, status, output, tldr, cleanup.
 """
 
 from __future__ import annotations
@@ -158,6 +158,8 @@ class Driver(ABC):
         model: Optional[str],
         state_dir: Optional[str],
         system_prompt: Optional[str],
+        cwd: Optional[str],
+        yolo: bool,
     ) -> None: ...
 
     @abstractmethod
@@ -175,6 +177,21 @@ class Driver(ABC):
     @abstractmethod
     def cleanup(self, role_id: str, state_dir: Optional[str]) -> None: ...
 
+    @abstractmethod
+    def run(
+        self,
+        prompt_file: str,
+        model: Optional[str],
+        system_prompt: Optional[str],
+        cwd: Optional[str],
+        yolo: bool,
+    ) -> str:
+        """One-shot, stateless invocation. Returns assistant text directly.
+        No state dir writes. Caller does not pass role-id. Each driver is
+        responsible for cleaning up any backend-side session it creates.
+        """
+        ...
+
 
 # ============================================================
 # Claude driver
@@ -189,7 +206,7 @@ class ClaudeDriver(Driver):
     def detect(cls) -> Optional[str]:
         return shutil.which("claude")
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt):
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
@@ -204,6 +221,8 @@ class ClaudeDriver(Driver):
             cmd += ["--model", model]
         if system_prompt:
             cmd += ["--system-prompt", system_prompt]
+        if yolo:
+            cmd += ["--dangerously-skip-permissions"]
 
         meta = {
             "backend": "claude",
@@ -212,12 +231,15 @@ class ClaudeDriver(Driver):
             "round_count": 0,
             "state": "spawning",
             "system_prompt": system_prompt,
+            "cwd": cwd,
+            "yolo": yolo,
         }
         write_meta(role_id, state_dir, meta)
 
         with r0_in.open() as f:
             result = subprocess.run(
-                cmd, stdin=f, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT
+                cmd, stdin=f, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
+                cwd=cwd,
             )
 
         (sd / "output" / "r0.txt").write_text(result.stdout)
@@ -246,10 +268,13 @@ class ClaudeDriver(Driver):
         cmd = ["claude", "-p", "--resume", meta["sid"]]
         if meta.get("model") and meta["model"] != "default":
             cmd += ["--model", meta["model"]]
+        if meta.get("yolo", False):
+            cmd += ["--dangerously-skip-permissions"]
 
         with rN_in.open() as f:
             result = subprocess.run(
-                cmd, stdin=f, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT
+                cmd, stdin=f, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
+                cwd=meta.get("cwd"),
             )
 
         (sd / "output" / f"r{n}.txt").write_text(result.stdout)
@@ -286,6 +311,23 @@ class ClaudeDriver(Driver):
                     if d.is_dir():
                         shutil.rmtree(d, ignore_errors=True)
         shutil.rmtree(sd, ignore_errors=True)
+
+    def run(self, prompt_file, model, system_prompt, cwd, yolo):
+        cmd = ["claude", "-p"]
+        if model:
+            cmd += ["--model", model]
+        if system_prompt:
+            cmd += ["--system-prompt", system_prompt]
+        if yolo:
+            cmd += ["--dangerously-skip-permissions"]
+        with open(prompt_file) as f:
+            result = subprocess.run(
+                cmd, stdin=f, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
+                cwd=cwd,
+            )
+        if result.returncode != 0:
+            raise RuntimeError(f"claude run failed (rc={result.returncode}): {result.stderr.strip()}")
+        return result.stdout
 
 
 # ============================================================
@@ -369,21 +411,29 @@ class OpencodeDriver(Driver):
             )
         return sid, "".join(chunks)
 
-    def _run(self, role_id, state_dir, prompt_text, *, session: Optional[str], model: Optional[str]):
+    def _run(self, role_id, state_dir, prompt_text, *, session: Optional[str], model: Optional[str], cwd: Optional[str] = None, yolo: bool = False):
         cmd = [self._opencode(), "run", prompt_text, "--format", "json"]
         if session:
             cmd += ["--session", session]
         else:
-            cmd += ["--title", f"agent-session-{role_id}"]
+            cmd += ["--title", f"agent-session-{role_id or 'run'}"]
         if model:
             cmd += ["-m", model]
+        if cwd:
+            cmd += ["--dir", cwd]
+        if yolo:
+            cmd += ["--dangerously-skip-permissions"]
+        agent_env = os.environ.get("OPENCODE_AGENT")
+        if agent_env:
+            cmd += ["--agent", agent_env]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT)
         if result.returncode != 0:
-            append_log(role_id, state_dir, f"opencode run rc={result.returncode}\nstderr:\n{result.stderr}\nstdout:\n{result.stdout}")
+            if role_id is not None:
+                append_log(role_id, state_dir, f"opencode run rc={result.returncode}\nstderr:\n{result.stderr}\nstdout:\n{result.stdout}")
             raise RuntimeError(f"opencode run failed (rc={result.returncode}): {result.stderr.strip() or result.stdout.strip()[:300]}")
         return self._parse_run_output(result.stdout)
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt):
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
@@ -402,11 +452,13 @@ class OpencodeDriver(Driver):
             "round_count": 0,
             "state": "spawning",
             "system_prompt": system_prompt,
+            "cwd": cwd,
+            "yolo": yolo,
         }
         write_meta(role_id, state_dir, meta)
 
         try:
-            sid, text = self._run(role_id, state_dir, prompt_content, session=None, model=model)
+            sid, text = self._run(role_id, state_dir, prompt_content, session=None, model=model, cwd=cwd, yolo=yolo)
         except RuntimeError:
             meta["state"] = "failed"
             write_meta(role_id, state_dir, meta)
@@ -438,7 +490,15 @@ class OpencodeDriver(Driver):
         if model == "default":
             model = None
         try:
-            _, text = self._run(role_id, state_dir, rN_in.read_text(), session=meta["sid"], model=model)
+            _, text = self._run(
+                role_id,
+                state_dir,
+                rN_in.read_text(),
+                session=meta["sid"],
+                model=model,
+                cwd=meta.get("cwd"),
+                yolo=meta.get("yolo", False),
+            )
         except RuntimeError:
             meta["state"] = "error"
             write_meta(role_id, state_dir, meta)
@@ -471,6 +531,29 @@ class OpencodeDriver(Driver):
                 append_log(role_id, state_dir, f"cleanup opencode session delete failed: {e}")
         shutil.rmtree(sd, ignore_errors=True)
 
+    def run(self, prompt_file, model, system_prompt, cwd, yolo):
+        prompt_content = Path(prompt_file).read_text()
+        if system_prompt:
+            prompt_content = f"<system>\n{system_prompt}\n</system>\n\n{prompt_content}"
+        sid, text = self._run(
+            role_id=None,
+            state_dir=None,
+            prompt_text=prompt_content,
+            session=None,
+            model=model,
+            cwd=cwd,
+            yolo=yolo,
+        )
+        if sid:
+            try:
+                subprocess.run(
+                    [self._opencode(), "session", "delete", sid],
+                    capture_output=True, text=True, timeout=30,
+                )
+            except Exception:
+                pass
+        return text
+
 
 # ============================================================
 # Codex driver
@@ -493,16 +576,19 @@ class CodexDriver(Driver):
         cwd.mkdir(parents=True, exist_ok=True)
         return cwd.resolve()
 
-    def _common_flags(self) -> list[str]:
+    def _common_flags(self, yolo: bool = False) -> list[str]:
         # Non-interactive: bypass approvals; sandbox read-only so a role can't damage the host
-        return ["--full-auto", "--skip-git-repo-check"]
+        flags = ["--full-auto", "--skip-git-repo-check"]
+        if yolo:
+            flags.append("--dangerously-bypass-approvals-and-sandbox")
+        return flags
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt):
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
 
-        cwd = self._session_cwd(role_id, state_dir)
+        session_cwd = Path(cwd).resolve() if cwd else self._session_cwd(role_id, state_dir)
 
         # Compose prompt (codex has no separate system-prompt flag — prepend if given)
         prompt_content = Path(prompt_file).read_text()
@@ -520,14 +606,15 @@ class CodexDriver(Driver):
             "round_count": 0,
             "state": "spawning",
             "system_prompt": system_prompt,
-            "cwd": str(cwd),
+            "cwd": str(session_cwd),
+            "yolo": yolo,
         }
         write_meta(role_id, state_dir, meta)
 
         # spawn: use --cd (codex exec supports it). Don't also set subprocess cwd= or
         # codex would try to resolve the same path twice.
-        cmd = ["codex", "exec", *self._common_flags(),
-               "--cd", str(cwd),
+        cmd = ["codex", "exec", *self._common_flags(yolo),
+               "--cd", str(session_cwd),
                "--output-last-message", str(r0_out.resolve())]
         if model:
             cmd += ["-m", model]
@@ -569,7 +656,7 @@ class CodexDriver(Driver):
         # send: `codex exec resume` does NOT accept --cd; use subprocess cwd= so that
         # `--last` resolves to the session created in this exact directory by spawn.
         prompt_content = rN_in.read_text()
-        cmd = ["codex", "exec", "resume", "--last", *self._common_flags(),
+        cmd = ["codex", "exec", "resume", "--last", *self._common_flags(meta.get("yolo", False)),
                "--output-last-message", str(rN_out.resolve())]
         if meta.get("model") and meta["model"] != "default":
             cmd += ["-m", meta["model"]]
@@ -605,6 +692,13 @@ class CodexDriver(Driver):
         # codex sessions live under ~/.codex/sessions or similar; we don't reach in to delete them
         # (they get GC'd by codex itself or stay harmless). Just nuke our state dir.
         shutil.rmtree(sd, ignore_errors=True)
+
+    def run(self, prompt_file, model, system_prompt, cwd, yolo):
+        raise NotImplementedError(
+            "codex driver `run()` not implemented yet — "
+            "this jam (agent-session-generic-entry) ships opencode + claude only. "
+            "Track in a follow-up issue."
+        )
 
 
 # ============================================================
@@ -779,7 +873,32 @@ def cmd_spawn(args) -> int:
             args.model,
             args.state_dir,
             args.system_prompt,
+            args.cwd,
+            args.yolo,
         )
+    return 0
+
+
+def cmd_run(args) -> int:
+    """One-shot stateless invocation. Returns assistant text to stdout."""
+    cls = get_driver_for_backend(args.backend)
+    if not cls:
+        print(f"unknown backend: {args.backend} (run `agent-session list-backends`)", file=sys.stderr)
+        return 2
+    if not cls.detect():
+        print(f"backend not installed: {args.backend} — see references/backend-{args.backend}.md", file=sys.stderr)
+        return 2
+
+    text = cls().run(
+        args.prompt_file,
+        args.model,
+        args.system_prompt,
+        args.cwd,
+        args.yolo,
+    )
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
     return 0
 
 
@@ -873,20 +992,33 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list-backends", help="list detected backends, one per line")
 
     p_describe = sub.add_parser("describe", help="describe a session")
-    p_describe.add_argument("--role-id", required=True)
+    p_describe.add_argument("--role-id", "--session-id", dest="role_id", required=True)
     p_describe.add_argument("--state-dir")
 
     p_spawn = sub.add_parser("spawn", help="create a session and run first turn")
     p_spawn.add_argument("--backend", required=True)
-    p_spawn.add_argument("--role-id", required=True)
+    p_spawn.add_argument("--role-id", "--session-id", dest="role_id", required=True)
     p_spawn.add_argument("--prompt-file", required=True)
     p_spawn.add_argument("--model")
     p_spawn.add_argument("--state-dir")
     p_spawn.add_argument("--system-prompt")
     p_spawn.add_argument("--force", action="store_true")
+    p_spawn.add_argument("--cwd")
+    p_spawn.add_argument("--yolo", action="store_true")
+
+    p_run = sub.add_parser(
+        "run",
+        help="one-shot, stateless invocation: returns assistant text to stdout",
+    )
+    p_run.add_argument("--backend", required=True)
+    p_run.add_argument("--prompt-file", required=True)
+    p_run.add_argument("--model")
+    p_run.add_argument("--system-prompt")
+    p_run.add_argument("--cwd")
+    p_run.add_argument("--yolo", action="store_true")
 
     p_send = sub.add_parser("send", help="continue an existing session")
-    p_send.add_argument("--role-id", required=True)
+    p_send.add_argument("--role-id", "--session-id", dest="role_id", required=True)
     p_send.add_argument("--prompt-file", required=True)
     p_send.add_argument("--state-dir")
 
@@ -894,21 +1026,21 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="read session state (always synchronous; spawn/send block until done)",
     )
-    p_status.add_argument("--role-id", required=True)
+    p_status.add_argument("--role-id", "--session-id", dest="role_id", required=True)
     p_status.add_argument("--state-dir")
 
     p_output = sub.add_parser("output", help="read assistant message")
-    p_output.add_argument("--role-id", required=True)
+    p_output.add_argument("--role-id", "--session-id", dest="role_id", required=True)
     p_output.add_argument("--state-dir")
     p_output.add_argument("--round", type=int)
 
     p_tldr = sub.add_parser("tldr", help="extract TL;DR + stance as JSON for the latest round")
-    p_tldr.add_argument("--role-id", required=True)
+    p_tldr.add_argument("--role-id", "--session-id", dest="role_id", required=True)
     p_tldr.add_argument("--state-dir")
     p_tldr.add_argument("--round", type=int)
 
     p_cleanup = sub.add_parser("cleanup", help="close session and remove state")
-    p_cleanup.add_argument("--role-id", required=True)
+    p_cleanup.add_argument("--role-id", "--session-id", dest="role_id", required=True)
     p_cleanup.add_argument("--state-dir")
 
     return p
@@ -919,6 +1051,7 @@ HANDLERS = {
     "list-backends": cmd_list_backends,
     "describe": cmd_describe,
     "spawn": cmd_spawn,
+    "run": cmd_run,
     "send": cmd_send,
     "status": cmd_status,
     "output": cmd_output,

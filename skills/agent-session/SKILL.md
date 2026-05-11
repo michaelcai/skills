@@ -13,17 +13,19 @@ Persistent multi-turn session abstraction over heterogeneous LLM backend CLIs. U
 Different backend CLIs have different commands, session models, and output formats:
 
 - `claude -p --session-id $SID` / `--resume $SID` (Claude Anthropic)
-- `oc-task spawn` / `send` / `status` (opencode, multi-provider)
+- `opencode run --session $SID` (opencode, multi-provider)
 - `codex exec` (OpenAI)
 - ...
 
-A skill that wants multi-model multi-turn dialogue should not hard-code any of these. `agent-session` provides a 6-verb CLI that hides backend differences:
+A skill that wants multi-model multi-turn dialogue should not hard-code any of these. `agent-session` provides a backend-neutral CLI that hides backend differences:
 
 ```
 agent-session doctor                                                # health check
 agent-session list-backends                                         # programmatic: which backends are available
 agent-session describe   --role-id R                                # what backend/model is this role using
-agent-session spawn      --backend X --role-id R --prompt-file P [--model M] [--state-dir D] [--system-prompt S]
+agent-session spawn      --backend X --role-id R --prompt-file P [--model M] [--state-dir D] [--system-prompt S] [--cwd D] [--yolo]
+                         (--session-id is an alias for --role-id)
+agent-session run        --backend X --prompt-file P [--model M] [--system-prompt S] [--cwd D] [--yolo]
 agent-session send       --role-id R --prompt-file P [--state-dir D]
 agent-session status     --role-id R [--state-dir D]
 agent-session output     --role-id R [--round N] [--state-dir D]
@@ -32,7 +34,7 @@ agent-session cleanup    --role-id R [--state-dir D]
 
 ## Backend installation is NOT this skill's job
 
-Users install `claude` / `oc-task` / `codex` / etc. independently. `agent-session` only **detects** what's already installed and dispatches calls to whatever's there.
+Users install `claude` / `opencode` / `codex` / etc. independently. `agent-session` only **detects** what's already installed and dispatches calls to whatever's there.
 
 If a backend is missing, `doctor` reports it; downstream skills (e.g. debate) decide whether to fail or degrade.
 
@@ -50,7 +52,7 @@ bin/agent-session (dispatcher)
     │       codex    → drivers/codex.py    (future)
     │
     ├── Driver interface  ← every backend implements:
-    │       detect()  spawn()  send()  status()  output()  cleanup()
+    │       detect()  spawn()  run()  send()  status()  output()  cleanup()
     │
     └── Session State (filesystem)
         $AGENT_SESSION_DIR/<role-id>/
@@ -100,7 +102,7 @@ Read-only health check. Prints which backends are detected, where they live, wha
 $ agent-session doctor
 Detected:
   ✓ claude    /usr/local/bin/claude
-  ✓ opencode  ~/.pai/.../oc-task
+  ✓ opencode  /usr/local/bin/opencode
   ✗ codex     not installed   see references/backend-codex.md
 
 Multi-model: ✓ (claude + opencode)
@@ -130,8 +132,32 @@ Creates a new session and runs the first turn.
 | `--model` | no | Backend-specific model name; driver picks default if omitted |
 | `--state-dir` | no | Override `$AGENT_SESSION_DIR`; e.g. debate passes `$DEBATE_DIR/sessions/` |
 | `--system-prompt` | no | System-level instructions; passed to backend if it supports it |
+| `--cwd` | no | Working directory for the backend subprocess. claude inherits via subprocess cwd; opencode uses `--dir`; codex uses `--cd`. |
+| `--yolo` | no | Bypass permission prompts (`--dangerously-skip-permissions` on claude/opencode, `--dangerously-bypass-approvals-and-sandbox` on codex). For autonomous Agent invocations, see references/backend-<name>.md for default-mode behavior. |
 
 stdout: nothing significant on success (caller reads via `output --round 0`). Non-zero exit on failure; stderr explains.
+
+### `run`
+
+One-shot, stateless invocation. Returns the assistant's reply to stdout. No state directory, no cleanup needed — the driver disposes of any backend-side session it creates.
+
+| Arg | Required | Notes |
+|---|---|---|
+| `--backend` | yes | One of the names from `list-backends` |
+| `--prompt-file` | yes | Path to prompt (markdown / plain text) |
+| `--model` | no | Backend-specific model name |
+| `--system-prompt` | no | System-level instructions (opencode has no native flag — driver prepends to prompt) |
+| `--cwd` | no | Working directory for the backend subprocess. claude inherits via subprocess cwd; opencode uses `--dir`; codex uses `--cd`. |
+| `--yolo` | no | Bypass permission prompts (`--dangerously-skip-permissions` on claude/opencode, `--dangerously-bypass-approvals-and-sandbox` on codex). For autonomous Agent invocations, see references/backend-<name>.md for default-mode behavior. |
+
+stdout: full assistant text. Non-zero exit + stderr on failure.
+
+Example (Agent ad-hoc review):
+
+```bash
+cd ~/workspace/some-repo
+agent-session run --backend opencode --cwd "$PWD" --yolo --prompt-file /tmp/review-prompt.md
+```
 
 ### `send`
 
@@ -183,6 +209,12 @@ Both fall back to `binary_family` when the model is unknown — never to `"unkno
 
 `doctor` additionally probes **auth identity** per backend (`anthropic-api` / `openai-chatgpt` / `openai-api` / ...) — two backends with distinct binaries can still share an upstream account, in which case "cross-family" is notional, not actual. The doctor warning surfaces this collision.
 
+### CLI flag aliases
+
+`--session-id` is an accepted alias for `--role-id` on every verb that takes one. The two are mutually substitutable; `meta.json` / `describe` JSON output retains the `role_id` field name for backward compatibility with existing callers (debate).
+
+When integrating a new multi-turn caller that doesn't have a "role" concept, prefer `--session-id`.
+
 ## Caller conventions (for skills using agent-session)
 
 When integrating, follow these:
@@ -197,7 +229,7 @@ When integrating, follow these:
 
 See `references/adding-a-backend.md` for the full driver protocol. TL;DR:
 
-1. Add `drivers/<name>.py` implementing `Driver` (7 methods)
+1. Add `drivers/<name>.py` implementing `Driver` (8 methods: detect, spawn, send, status, output, cleanup, describe, run)
 2. Register in `drivers/__init__.py`
 3. Add `references/backend-<name>.md` with install steps for users
 4. Add tests in `tests/`
@@ -207,7 +239,7 @@ See `references/adding-a-backend.md` for the full driver protocol. TL;DR:
 | Component | Purpose |
 |---|---|
 | Python 3.10+ | Run `bin/agent-session` (single-file Python script) |
-| At least one backend CLI | What a session actually runs against (claude / oc-task / ...) |
+| At least one backend CLI | What a session actually runs against (claude / opencode / codex / ...) |
 
 No third-party Python packages — stdlib only.
 
