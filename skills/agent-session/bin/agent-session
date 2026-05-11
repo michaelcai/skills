@@ -908,13 +908,17 @@ def cmd_run(args) -> int:
         return 2
     args.cwd = resolved_cwd
 
-    text = cls().run(
-        args.prompt_file,
-        args.model,
-        args.system_prompt,
-        args.cwd,
-        args.yolo,
-    )
+    try:
+        text = cls().run(
+            args.prompt_file,
+            args.model,
+            args.system_prompt,
+            args.cwd,
+            args.yolo,
+        )
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        return 1
     sys.stdout.write(text)
     if not text.endswith("\n"):
         sys.stdout.write("\n")
