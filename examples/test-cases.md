@@ -64,7 +64,7 @@ bash ~/.michaelcai-skills/skills/debate/tests/run-unit.sh
 (Adjust path to where you cloned the repo.)
 
 **Pass**:
-- `agent-session`: `Result: 20 passed, 0 failed`
+- `agent-session`: `Result: 50 passed, 0 failed`
 - `debate`: `Result: 20 passed, 0 failed`
 
 **Troubleshooting**:
@@ -198,6 +198,71 @@ echo "exit code: $?"   # expected: 0
 ```
 
 **Pass**: exit code is 0; no error printed.
+
+### B7. One-shot `run` verb (no state, no cleanup)
+
+For ad-hoc cross-Agent invocations (e.g. `/jam` review) where you don't need multi-turn context: use `run`. The driver cleans up any backend-side session it created; no `state-dir`, no manual `cleanup` call.
+
+```bash
+agent-session run --backend opencode --cwd "$PWD" \
+  --prompt-file ./p_ready.md --model openai/gpt-5.4-mini
+```
+
+**Pass**: stdout is `READY` (or close). No new directory under `./state/`.
+
+Add `--yolo` when the prompt may trigger tool calls that need permission bypass — typical for review prompts that read files in `--cwd`:
+
+```bash
+agent-session run --backend opencode --cwd "$PWD" --yolo \
+  --prompt-file ./p_ready.md --model openai/gpt-5.4-mini
+```
+
+**Pass**: same; on backends supporting it, no permission prompt surfaces.
+
+**Troubleshooting**:
+- `codex` reports "run() not implemented yet" → use `spawn` + `output` + `cleanup` for codex one-shots until the driver lands.
+- Output has a model error or empty body → `agent-session doctor` to verify the backend + auth.
+
+### B8. Subprocess timeout enforced (clean error, not traceback)
+
+When a backend turn exceeds the configured ceiling, `agent-session` records `state="error"` in `meta.json` and raises a clean RuntimeError with override hints. Priority: `--timeout` flag > `$AGENT_SESSION_TIMEOUT` env > default 1800s.
+
+```bash
+# Force a 1-second ceiling — virtually any real call exceeds this.
+AGENT_SESSION_TIMEOUT=1 agent-session spawn --backend opencode \
+  --role-id timeout-env --prompt-file ./p_ready.md \
+  --state-dir ./state --model openai/gpt-5.4-mini
+echo "exit: $?"
+```
+
+**Pass**:
+- Exit code 1 (not a Python traceback).
+- stderr contains `timed out after 1s` plus a hint mentioning `--timeout` and `$AGENT_SESSION_TIMEOUT`.
+- `cat ./state/timeout-env/meta.json` shows `"state": "error"` and an `"error"` field recording the timeout.
+
+```bash
+# Same outcome via --timeout flag, which persists to meta so any follow-up `send` inherits it.
+agent-session spawn --backend opencode \
+  --role-id timeout-flag --prompt-file ./p_ready.md \
+  --state-dir ./state --model openai/gpt-5.4-mini --timeout 1
+echo "exit: $?"
+agent-session describe --role-id timeout-flag --state-dir ./state
+```
+
+**Pass**:
+- Same exit / stderr / meta as the env case.
+- `describe` output includes `"timeout": 1` — proves the value persisted (so a `send` would also enforce 1s).
+
+**Cleanup**:
+
+```bash
+agent-session cleanup --role-id timeout-env  --state-dir ./state
+agent-session cleanup --role-id timeout-flag --state-dir ./state
+```
+
+**Troubleshooting**:
+- Exit 0 with normal output (race: opencode responded in <1s on cached input) → retry once; the mechanical version of this case is verified in `tests/run-unit.sh` against a fake binary that always sleeps.
+- Traceback instead of clean error → `subprocess.TimeoutExpired` is not being caught at one of the 6 `subprocess.run` sites in `bin/agent-session`; check `git log` for a partial refactor.
 
 ---
 
@@ -381,7 +446,7 @@ When running all suites, summarize:
 
 ```
 Suite A (install):           [_/4]   notes:
-Suite B (single backend):    [_/6]   notes:
+Suite B (single backend):    [_/8]   notes:
 Suite C (debate):            [_/4]   notes (qualitative):
 Suite D (prefs.json):        [_/4]   notes (qualitative):
 ```
