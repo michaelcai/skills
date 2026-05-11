@@ -25,11 +25,15 @@ class MyBackendDriver(Driver):
     def models(cls) -> list[str]:
         """List of model aliases this backend can drive (best-effort)."""
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt) -> None:
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo) -> None:
         """Create a session and run the first turn.
         Must write meta.json with at least: backend, family, model, sid, round_count, state.
         Must write output/r0.txt with the assistant message text.
         Raise RuntimeError on failure (caller catches and reports)."""
+
+    def run(self, prompt_file, model, system_prompt, cwd, yolo) -> str:
+        """Run one stateless turn and return assistant text directly.
+        Must not write agent-session state. Clean up backend-side sessions if created."""
 
     def send(self, role_id, prompt_file, state_dir) -> None:
         """Continue the session with a follow-up turn.
@@ -49,6 +53,7 @@ class MyBackendDriver(Driver):
 - **Synchronous spawn / send**: agent-session's caller protocol assumes spawn and send block until the assistant has spoken. Async backends should still wait inside the driver.
 - **State exclusively via `meta.json`**: any backend-specific session id (`sid`), daemon port, etc. lives in meta — never expose to the caller.
 - **No prompts in stdout**: the driver writes output to `output/r<n>.txt`. The caller reads via `agent-session output`.
+- **Stateless run stdout**: `run()` returns assistant text directly; the dispatcher writes it to stdout.
 - **Append-only log**: write debug info to `state_dir/<role_id>/log` for post-mortem.
 - **Idempotent cleanup**: must succeed on missing or corrupt sessions (return without error).
 
@@ -78,6 +83,7 @@ Add at least:
 - [ ] Driver class registered in `DRIVERS`
 - [ ] `detect()` returns path string or None — never raises
 - [ ] `cleanup()` is idempotent
+- [ ] `run()` is stateless and cleans backend-side sessions when applicable
 - [ ] `meta.json` has all 6 required fields
 - [ ] `references/backend-<name>.md` written
 - [ ] Smoke test passes when backend installed

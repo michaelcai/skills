@@ -64,6 +64,36 @@ out=$("$AS" --help 2>&1)
 assert_contains "$out" "doctor" "help lists doctor"
 assert_contains "$out" "spawn" "help lists spawn"
 assert_contains "$out" "cleanup" "help lists cleanup"
+assert_contains "$out" "run" "help lists run"
+
+# --session-id alias works where --role-id is accepted.
+out=$(
+  "$AS" describe --session-id ghost 2>&1
+)
+assert_contains "$out" "session not found" "describe accepts --session-id"
+
+# run validates required args and unknown backends.
+"$AS" run --prompt-file /tmp/x >/dev/null 2>&1
+assert_rc $? 2 "run without --backend exits 2"
+
+out=$("$AS" run --backend frobnicate --prompt-file /tmp/x 2>&1)
+rc=$?
+assert_rc $rc 2 "run unknown backend exits 2"
+assert_contains "$out" "unknown backend" "run unknown backend names it"
+
+if command -v claude >/dev/null 2>&1; then
+  out=$("$AS" run --backend claude --prompt-file "$TMPDIR_BASE/p.md" --cwd "$TMPDIR_BASE/missing-cwd" 2>&1)
+  rc=$?
+  assert_rc $rc 2 "run with missing cwd exits 2"
+  assert_contains "$out" "cwd does not exist" "run with missing cwd has clear error"
+  if echo "$out" | grep -q "Traceback"; then
+    echo "  FAIL run with missing cwd does not show traceback"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS run with missing cwd does not show traceback"
+    PASS=$((PASS + 1))
+  fi
+fi
 
 echo ""
 echo "=== doctor ==="
@@ -111,6 +141,16 @@ with tempfile.TemporaryDirectory() as td:
 
     # session_dir
     assert session_dir("test-role", td) == Path(td) / "test-role", "session_dir composition"
+
+    # cwd validation normalizes valid cwd to absolute path and rejects missing dirs
+    cwd_ok = Path(td) / "cwd-ok"
+    cwd_ok.mkdir()
+    err, normalized = m._resolve_cwd(str(cwd_ok))
+    assert err is None, f"valid cwd returned error: {err}"
+    assert normalized == str(cwd_ok.resolve()), f"cwd not normalized: {normalized}"
+    err, normalized = m._resolve_cwd(str(Path(td) / "missing"))
+    assert err and "cwd does not exist" in err, f"missing cwd error unclear: {err}"
+    assert normalized is None, f"missing cwd should not normalize: {normalized}"
 
 print("PY OK")
 PY

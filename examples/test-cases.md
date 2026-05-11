@@ -50,7 +50,7 @@ agent-session doctor
 
 **Troubleshooting**:
 - `✗ claude` → install Claude CLI: `curl -fsSL https://claude.ai/install.sh | bash`, then `claude` once to log in.
-- `✗ opencode` → either install opencode and `oc-task` (see `skills/agent-session/references/backend-opencode.md`), or accept it and ensure `codex` is installed.
+- `✗ opencode` → install opencode (see `skills/agent-session/references/backend-opencode.md`), or accept it and ensure `codex` is installed.
 - `✗ codex` → `npm install -g @openai/codex && codex login`.
 - `Multi-model capability: ✗` → at least one non-Claude backend is required for `debate`. Install one of the above.
 
@@ -151,7 +151,7 @@ agent-session cleanup --role-id b4 --state-dir ./state
 **Pass**: All three expectations hold.
 
 **Troubleshooting**:
-- r1 returns the same text as r0 → session is being created fresh on `send` instead of resuming. Check the driver's `send()`: it should pass `--resume <sid>` (claude) or use `cwd=` (codex) or `oc-task send` (opencode).
+- r1 returns the same text as r0 → session is being created fresh on `send` instead of resuming. Check the driver's `send()`: it should pass `--resume <sid>` (claude), use `cwd=` (codex), or pass `--session <sid>` to opencode.
 - r1 returns "What is my name?" verbatim → backend echoed the prompt; check `--system-prompt` constraints.
 
 ### B5. Practical: code-review with a single backend

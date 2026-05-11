@@ -54,6 +54,26 @@ The driver passes `--full-auto` and `--skip-git-repo-check`:
 
 If you want stricter sandboxing, modify `_common_flags()` in `bin/agent-session` to add `-s read-only` (full-auto + read-only is a common combo for non-mutating roles).
 
+## Permission behavior
+
+`agent-session --yolo` maps to `codex exec --dangerously-bypass-approvals-and-sandbox`.
+
+`agent-session --cwd D` maps to `codex exec --cd D` for `spawn`. Follow-up `send` calls resume from the recorded cwd via subprocess cwd because `codex exec resume --last` does not accept `--cd`.
+
+### `run()` not implemented
+
+Codex driver currently only implements `spawn` / `send` / etc. for multi-turn sessions; the `run` verb raises `NotImplementedError`. Track this in a follow-up issue.
+
+### Without `--yolo` in non-interactive mode
+
+Empirical findings from `~/workspace/workshop/jams/active/agent-session-generic-entry/empirical-permission-results.md`:
+
+- `codex exec` refused the non-git `/tmp/aspermtest` cwd until `--skip-git-repo-check` was supplied.
+- After that, default non-interactive mode reported `approval: never`, `sandbox: read-only`, and model `gpt-5.4`.
+- Read within cwd succeeded and returned `hello world` from `inside.txt`.
+- Bash for `ls /tmp/aspermtest` succeeded in the read-only sandbox and returned `inside.txt`.
+- With `--dangerously-bypass-approvals-and-sandbox`, the same bash prompt succeeded and codex reported `sandbox: danger-full-access`.
+
 ## Limitations
 
 - The driver assumes `--last` is cwd-scoped, which is codex's current default behavior. If codex changes the default to global, sessions could collide and the driver would need to parse session ids from `--json` output instead.

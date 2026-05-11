@@ -56,3 +56,19 @@ alias claude='claude --model sonnet'
 | (none) | The driver shells out to `claude` directly with no env var customization |
 
 If `claude` is not on `PATH`, the driver fails detection — install it system-wide or symlink.
+
+## Permission behavior
+
+`agent-session --yolo` maps to `claude --dangerously-skip-permissions`.
+
+`agent-session --cwd D` maps to subprocess cwd. Claude has no separate cwd flag; the working directory is inherited from the subprocess environment.
+
+### Without `--yolo` in non-interactive mode
+
+Based on empirical testing in `~/workspace/workshop/jams/active/agent-session-generic-entry/empirical-permission-results.md`:
+
+- Workspace trust dialog was skipped in non-interactive `claude -p` mode.
+- Read within cwd succeeded and returned `hello world` from `inside.txt`.
+- Bash for `ls /tmp/aspermtest` succeeded and returned `inside.txt`.
+
+For autonomous Agent invocations, pass `--yolo` when the task may need tools and you can tolerate permission bypass semantics.
