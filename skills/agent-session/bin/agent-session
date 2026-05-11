@@ -825,10 +825,13 @@ def cmd_list_backends(args) -> int:
     return 0
 
 
-def _validate_cwd(cwd: Optional[str]) -> Optional[str]:
-    if cwd and not Path(cwd).is_dir():
-        return f"cwd does not exist or is not a directory: {cwd}"
-    return None
+def _resolve_cwd(cwd: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    if not cwd:
+        return None, None
+    path = Path(cwd)
+    if not path.is_dir():
+        return f"cwd does not exist or is not a directory: {cwd}", None
+    return None, str(path.resolve())
 
 
 def cmd_describe(args) -> int:
@@ -871,10 +874,11 @@ def cmd_spawn(args) -> int:
     if not cls.detect():
         print(f"backend not installed: {args.backend} — see references/backend-{args.backend}.md", file=sys.stderr)
         return 2
-    cwd_error = _validate_cwd(args.cwd)
+    cwd_error, resolved_cwd = _resolve_cwd(args.cwd)
     if cwd_error:
         print(cwd_error, file=sys.stderr)
         return 2
+    args.cwd = resolved_cwd
 
     with lock(args.role_id, args.state_dir):
         cls().spawn(
@@ -898,10 +902,11 @@ def cmd_run(args) -> int:
     if not cls.detect():
         print(f"backend not installed: {args.backend} — see references/backend-{args.backend}.md", file=sys.stderr)
         return 2
-    cwd_error = _validate_cwd(args.cwd)
+    cwd_error, resolved_cwd = _resolve_cwd(args.cwd)
     if cwd_error:
         print(cwd_error, file=sys.stderr)
         return 2
+    args.cwd = resolved_cwd
 
     text = cls().run(
         args.prompt_file,

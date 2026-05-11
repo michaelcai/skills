@@ -142,6 +142,16 @@ with tempfile.TemporaryDirectory() as td:
     # session_dir
     assert session_dir("test-role", td) == Path(td) / "test-role", "session_dir composition"
 
+    # cwd validation normalizes valid cwd to absolute path and rejects missing dirs
+    cwd_ok = Path(td) / "cwd-ok"
+    cwd_ok.mkdir()
+    err, normalized = m._resolve_cwd(str(cwd_ok))
+    assert err is None, f"valid cwd returned error: {err}"
+    assert normalized == str(cwd_ok.resolve()), f"cwd not normalized: {normalized}"
+    err, normalized = m._resolve_cwd(str(Path(td) / "missing"))
+    assert err and "cwd does not exist" in err, f"missing cwd error unclear: {err}"
+    assert normalized is None, f"missing cwd should not normalize: {normalized}"
+
 print("PY OK")
 PY
 rc=$?
