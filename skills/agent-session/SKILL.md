@@ -26,6 +26,7 @@ agent-session describe   --role-id R                                # what backe
 agent-session spawn      --backend X --role-id R --prompt-file P [--model M] [--state-dir D] [--system-prompt S] [--cwd D] [--yolo]
                          (--session-id is an alias for --role-id)
 agent-session run        --backend X --prompt-file P [--model M] [--system-prompt S] [--cwd D] [--yolo]
+                         (codex run is not implemented yet; spawn/send still work)
 agent-session send       --role-id R --prompt-file P [--state-dir D]
 agent-session status     --role-id R [--state-dir D]
 agent-session output     --role-id R [--round N] [--state-dir D]

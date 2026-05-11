@@ -81,6 +81,20 @@ rc=$?
 assert_rc $rc 2 "run unknown backend exits 2"
 assert_contains "$out" "unknown backend" "run unknown backend names it"
 
+if command -v claude >/dev/null 2>&1; then
+  out=$("$AS" run --backend claude --prompt-file "$TMPDIR_BASE/p.md" --cwd "$TMPDIR_BASE/missing-cwd" 2>&1)
+  rc=$?
+  assert_rc $rc 2 "run with missing cwd exits 2"
+  assert_contains "$out" "cwd does not exist" "run with missing cwd has clear error"
+  if echo "$out" | grep -q "Traceback"; then
+    echo "  FAIL run with missing cwd does not show traceback"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS run with missing cwd does not show traceback"
+    PASS=$((PASS + 1))
+  fi
+fi
+
 echo ""
 echo "=== doctor ==="
 
