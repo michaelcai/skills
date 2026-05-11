@@ -58,36 +58,40 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
    ```
    First non-empty match wins. **Always print the chosen value as a visible line** so autodetect doesn't become hidden state.
 
-2. **Parallelism** (tmux):
+2. **Parallelism / visualization**:
    ```
-   --no-parallel flag → DEBATE_NO_TMUX → no TTY → tmux on PATH? → use it
+   --no-parallel flag → DEBATE_NO_TMUX → has TTY? → tmux on PATH?
    ```
-   Tmux split-pane is *visualization*, not parallelism — the loop in §2.5 / §3 already runs `agent-session` calls concurrently in subprocesses. Tmux just makes the live output legible. Missing tmux → silently degrade to single-pane background output.
+   The `& ... wait` loop in §2.5 / §Round N already runs roles concurrently regardless. Tmux split-pane is *visualization* on top. Print honestly:
+   - TTY attached + tmux available → `Parallel: tmux (split panes)`
+   - TTY attached, tmux not installed → `Parallel: background subprocess (tmux not found)`
+   - **No TTY** (moderator running headless) → `Parallel: background subprocess (no TTY for tmux panes)` — don't promise split panes you won't deliver.
 
-3. **Budget estimate** (rough):
+3. **Budget estimate**:
    ```
-   tokens   ≈ M_roles × R_planned × 1.7k       (R_planned default = 6, two checkpoints)
-   wall-clock ≈ longest-role-latency × R_planned   (parallel sends; default 30s/turn)
+   inter_round   ≈ M_roles × R_planned × 1.7k         (TL;DR piped to disk, moderator doesn't read full Argument)
+   checkpoint    ≈ floor(R_planned / 3) × M_roles × 1.5k  (moderator reads full Argument bodies to synthesize)
+   tokens_total  ≈ inter_round + checkpoint
+   wall-clock    ≈ longest-role-latency × R_planned + 20s × floor(R_planned/3)   (parallel sends + checkpoint synthesis)
    ```
+   For M=4, R=6: ~40k inter + ~12k checkpoint ≈ **~52k tokens**. Don't paper over the checkpoint cost — early test runs underestimated by ~30% by ignoring it.
 
 Print one combined gate, wait for user:
 
 ```
 Language: zh (autodetected from challenge text, override with /debate --lang xx)
-Parallel: tmux (split panes)
-Debate plan: 4 roles × ~6 rounds ≈ ~40k tokens, ~3 min wall-clock
+Parallel: background subprocess (no TTY for tmux panes)
+Debate plan: 4 roles × ~6 rounds ≈ ~52k tokens, ~4 min wall-clock
 Begin? (Y/n)  [or self-critique / cancel]
 ```
-
-If a flag/file/tool was missing and we degraded, the corresponding line says so (`Parallel: sequential (tmux not found)`).
 
 The running token counter reappears at the every-3-round checkpoint:
 
 ```
-Tokens: ~Xk used / ~40k planned (estimate)
+Tokens: ~Xk used / ~52k planned (estimate)
 ```
 
-(The 1.7k constant is a rough estimate; future telemetry will replace it with per-driver real counts. See `agent-session doctor` for auth-identity collisions that make the cross-family premise notional.)
+(The 1.7k / 1.5k constants are rough — future telemetry will replace with per-driver real counts. See `agent-session doctor` for auth-identity collisions that make the cross-family premise notional.)
 
 ### Step 2: Plan & spawn
 
@@ -220,6 +224,8 @@ When you modify a module: also update its invariants in the manifest if behavior
 
 Debate needs a **persistent multi-turn session per role**, with shared lifetime so cleanup is collective. Use [agent-session](../agent-session/SKILL.md)'s `spawn` verb to create each role's session — debate supplies role identity (defender / role-a / role-b / wildcard), model preference (resolved in §2.3), the role's first-turn input (§2.4), and a system prompt that requires debate's output schema (§2.4 references `references/output-format.md`). Run all spawns in parallel — round-1 prompts are independent, so wall-clock equals the slowest role's latency. Skip `role-b` when §2.3 made it topic-conditional.
 
+**[MUST] Pass `--timeout 900` at spawn time.** agent-session's default ceiling (1800s) is generous, but `spawn` persists `meta.timeout` for the entire session lifetime — if you don't set it explicitly, sends inherit whatever the env was when spawn ran. Empirically, gpt-5.5-class reasoning models on round-3+ resumes can take 200-400s per turn; 900s gives ~3x headroom. If a specific round still trips it, `send --force --timeout 1500` bumps and retries (see §Round N).
+
 After this step, each role's first-turn reply is observable via agent-session's `output` and `tldr` verbs; the role's full conversation history is owned by agent-session and never re-supplied by debate.
 
 For tmux *split-pane visualization* (not parallelism — concurrency comes from `& ... wait`): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
@@ -262,9 +268,64 @@ The focus bullets are the **only** content from this round that the moderator ty
 
 Pass the SAME `rN.md` to every role via agent-session's `send` verb, dispatched **in parallel**. Sequential within-round dispatch is not required — the prompt only references round N-1, so there's no in-round dialogue — and roughly doubles wall-clock.
 
+**[MUST] Collect per-role exit codes AND verify output.** A bare `wait` without arguments only waits, it doesn't surface individual failures. A round where `agent-session send` rejected a flag (e.g. `unrecognized arguments`) silently and `tldr` later returns the *previous round's* cached output is the classic false-success trap. Use this hardened pattern:
+
+```bash
+pids=()
+for r in defender role-a role-b wildcard; do
+  agent-session send --role-id "$r" \
+    --prompt-file "$DEBATE_DIR/rN.md" \
+    --state-dir "$SESSIONS_DIR" &
+  pids+=("$!:$r")
+done
+
+failed=()
+for entry in "${pids[@]}"; do
+  pid="${entry%%:*}"; role="${entry##*:}"
+  wait "$pid" || failed+=("$role:rc=$?")
+done
+
+# Belt + suspenders: even a 0-exit send is suspect if output is empty or missing the format marker.
+for r in defender role-a role-b wildcard; do
+  out=$(agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" 2>/dev/null)
+  echo "$out" | grep -q '^## TL;DR' || failed+=("$r:no-tldr")
+done
+
+[ ${#failed[@]} -gt 0 ] && echo "round N failed for: ${failed[*]}" >&2
+```
+
+If failures came from timeout (`meta.error` contains `timed out`), retry that role only with `send --force --timeout 1500` before moving on:
+
+```bash
+for entry in "${failed[@]}"; do
+  role="${entry%%:*}"
+  err=$(agent-session describe --role-id "$role" --state-dir "$SESSIONS_DIR" | jq -r '.error // ""')
+  if echo "$err" | grep -q "timed out"; then
+    agent-session send --role-id "$role" --force --timeout 1500 \
+      --prompt-file "$DEBATE_DIR/rN.md" --state-dir "$SESSIONS_DIR"
+  fi
+done
+```
+
 If you want Defender to rebut this-round critic arguments, do it as an **optional follow-up half-round** (one extra `send` to Defender after collecting the others' r_N), not by ordering the main round. Reserve for the round just before a checkpoint.
 
 For tmux split panes (visualization, not parallelism — sends already run concurrently): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
+
+##### Partial-success rounds
+
+Real debates produce ragged matrices — a role times out at round N while others reach N+1. Don't block the whole debate on alignment. Policy:
+
+- Each role's contribution to any aggregate (checkpoint, false-consensus distribution, conclusion) = **that role's latest successful round's TL;DR**.
+- Checkpoint headers must report the per-role round explicitly:
+
+  ```
+  ## Discussion progress @ Round 3 checkpoint
+  (Defender @ R2, Role A @ R3, Role B @ R2, Wildcard @ R3)
+  ```
+
+- A role that's behind is itself a false-consensus signal — note it in the Divergence section ("Role B has not yet responded to round-3 focus; convergence claim is premature without that perspective").
+- `round_count` is per-role, owned by agent-session's meta. Don't try to fake-align by sending an empty turn to the lagging role — the gap is *information*, not noise.
+- Optional: at the checkpoint, the moderator can decide to revive a stuck role (`send --force --timeout 1800`) one more time before declaring the gap structural.
 
 #### [MUST] Read strategy (token saving)
 
@@ -286,9 +347,44 @@ After the After-round step has cached each role's stance, inspect the distributi
 | Mostly `concede` | High | Local convergence; advance or end |
 | All `add` | — | **Parallel without dialogue — beware false consensus**; read full arguments |
 | Mixed | Medium | Decide via TL;DR content |
-| **≥1 `null` stance** | **Format drift** | **Re-spawn affected role or fix `references/output-format.md` before continuing — do not interpret this round's stance distribution as meaningful** |
+| **≥1 `null` stance** | **Format drift** | **Apply the format-correction escalation below before deciding to re-spawn or read past the round.** |
 
 Text similarity is unreliable. Same TL;DR + different stance tags = strongest false-consensus warning. A `null` stance amid otherwise-valid stances does **not** count as "Mostly X" — it must be resolved first.
+
+##### Format-correction escalation (for `null` stance)
+
+Re-spawning is expensive (loses the role's full conversation history) and reading past the issue is dishonest. Add a cheap intermediate step:
+
+1. **Single-turn format-correction send** to the affected role (~1 small send per role):
+
+   ```
+   Your previous reply did not match the required output format.
+   Send a corrected reply using EXACTLY this format:
+
+     ## TL;DR
+     <2-3 sentences>
+     [stance: hold|concede|add]   ← pick ONE from the closed set, no compound stances
+
+     ## Argument
+     <body>
+
+   Do not explain the issue. Send only the corrected reply.
+   ```
+
+   ```bash
+   agent-session send --role-id "<role>" \
+     --prompt-file "$DEBATE_DIR/format-correction.md" \
+     --state-dir "$SESSIONS_DIR"
+   ```
+
+2. Re-run the `tldr` extraction for that role. If stance is now in `{hold, concede, add}`, the corrected reply **replaces** the prior round's cached TL;DR — continue with the round's stance distribution as if nothing went wrong.
+
+3. If stance is still `null` after one correction attempt, treat the distribution as unresolved and choose:
+   - **Re-spawn** the role (last resort — loses prior context) — useful if the role's reasoning is also drifting.
+   - **Edit `references/output-format.md`** if the format itself is the root cause (run `tests/manifest-invariants.sh` after).
+   - **Continue with the role excluded from this round's distribution** — note it explicitly in the checkpoint Divergence section ("Role X had unresolved format drift in round N; their stance is unknown").
+
+[MUST] If you take option (a) or (c), say so in your reply to the user — silent skill deviation is worse than the format drift itself.
 
 #### Every-3-round checkpoint
 
