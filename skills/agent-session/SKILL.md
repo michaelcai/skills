@@ -135,8 +135,9 @@ Creates a new session and runs the first turn.
 | `--system-prompt` | no | System-level instructions; passed to backend if it supports it |
 | `--cwd` | no | Working directory for the backend subprocess. claude inherits via subprocess cwd; opencode uses `--dir`; codex uses `--cd`. |
 | `--yolo` | no | Bypass permission prompts (`--dangerously-skip-permissions` on claude/opencode, `--dangerously-bypass-approvals-and-sandbox` on codex). For autonomous Agent invocations, see references/backend-<name>.md for default-mode behavior. |
+| `--timeout` | no | Subprocess timeout in seconds. Persists to `meta.json` so `send` inherits it for follow-up rounds. Priority: explicit `--timeout` > meta-persisted > `$AGENT_SESSION_TIMEOUT` > default 1800s. |
 
-stdout: nothing significant on success (caller reads via `output --round 0`). Non-zero exit on failure; stderr explains.
+stdout: nothing significant on success (caller reads via `output --round 0`). Non-zero exit on failure; stderr explains. On `subprocess.TimeoutExpired` the state is marked `error`, `meta.error` records the timeout, and a clean `RuntimeError` (exit 1) describes the override mechanism.
 
 ### `run`
 
@@ -150,6 +151,7 @@ One-shot, stateless invocation. Returns the assistant's reply to stdout. No stat
 | `--system-prompt` | no | System-level instructions (opencode has no native flag — driver prepends to prompt) |
 | `--cwd` | no | Working directory for the backend subprocess. claude inherits via subprocess cwd; opencode uses `--dir`; codex uses `--cd`. |
 | `--yolo` | no | Bypass permission prompts (`--dangerously-skip-permissions` on claude/opencode, `--dangerously-bypass-approvals-and-sandbox` on codex). For autonomous Agent invocations, see references/backend-<name>.md for default-mode behavior. |
+| `--timeout` | no | Subprocess timeout in seconds. Priority: explicit `--timeout` > `$AGENT_SESSION_TIMEOUT` > default 1800s. |
 
 stdout: full assistant text. Non-zero exit + stderr on failure.
 
@@ -168,7 +170,17 @@ Sends a follow-up turn on an existing session.
 agent-session send --role-id role-a --prompt-file r3.md
 ```
 
-stdout: nothing on success; caller reads via `output --round N`.
+stdout: nothing on success; caller reads via `output --round N`. `send` reads the timeout persisted at `spawn` time from `meta.json`; override only at `spawn`.
+
+### Timeout
+
+All drivers run subprocess synchronously. The default ceiling is 1800s (30 min), tuned to accommodate gpt-5.5-class reasoning models on a multi-round resume. Override priority:
+
+1. `--timeout N` on `spawn` / `run` (per-call; spawn persists into `meta.json` so subsequent `send`s inherit)
+2. `AGENT_SESSION_TIMEOUT=N` env (process-wide)
+3. Default `1800`
+
+On `subprocess.TimeoutExpired` the session is marked `state="error"` with `meta.error` set to the timeout message — `describe` surfaces it, `send` refuses to continue. Callers wanting a different ceiling should re-`spawn` rather than try to resume an errored session.
 
 ### `status`
 

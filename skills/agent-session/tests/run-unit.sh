@@ -204,6 +204,53 @@ out=$("$AS" status --role-id missing --state-dir "$SP_DIR" 2>&1)
 assert_eq "$out" "error" "status of missing session prints 'error'"
 
 echo ""
+echo "=== timeout: --timeout flag exposed on spawn/run ==="
+
+"$AS" spawn --help 2>&1 | grep -q -- "--timeout"
+assert_rc $? 0 "spawn --help mentions --timeout"
+
+"$AS" run --help 2>&1 | grep -q -- "--timeout"
+assert_rc $? 0 "run --help mentions --timeout"
+
+echo ""
+echo "=== timeout: subprocess timeout surfaces as clean error + state=error ==="
+
+# Build a fake 'claude' binary that sleeps long enough to trigger any reasonable timeout.
+FAKE_BIN="$TMPDIR_BASE/fake-bin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/claude" <<'FAKE'
+#!/usr/bin/env bash
+sleep 30
+echo "should not reach here"
+FAKE
+chmod +x "$FAKE_BIN/claude"
+
+TO_DIR="$TMPDIR_BASE/timeout"
+
+# Case 1: --timeout flag triggers TimeoutExpired path
+out=$(PATH="$FAKE_BIN:$PATH" "$AS" spawn --backend claude --role-id slow1 \
+        --prompt-file "$TMPDIR_BASE/p.md" --state-dir "$TO_DIR" --timeout 1 2>&1)
+rc=$?
+assert_rc $rc 1 "spawn with --timeout 1 against sleep-30 fake exits non-zero"
+assert_contains "$out" "timed out after 1s" "stderr says 'timed out after 1s'"
+state=$(python3 -c "import json;print(json.load(open('$TO_DIR/slow1/meta.json'))['state'])")
+assert_eq "$state" "error" "meta.state is 'error' after timeout"
+err=$(python3 -c "import json;print(json.load(open('$TO_DIR/slow1/meta.json')).get('error',''))")
+assert_contains "$err" "timeout after 1s" "meta.error records timeout"
+
+# Case 2: AGENT_SESSION_TIMEOUT env triggers same path
+out=$(PATH="$FAKE_BIN:$PATH" AGENT_SESSION_TIMEOUT=1 "$AS" spawn --backend claude --role-id slow2 \
+        --prompt-file "$TMPDIR_BASE/p.md" --state-dir "$TO_DIR" 2>&1)
+rc=$?
+assert_rc $rc 1 "spawn with AGENT_SESSION_TIMEOUT=1 against sleep-30 fake exits non-zero"
+assert_contains "$out" "timed out after 1s" "env timeout: stderr says 'timed out after 1s'"
+
+# Case 3: --timeout persists to meta so send inherits it
+# (verify via meta.json directly — no need to actually run send)
+to_val=$(python3 -c "import json;print(json.load(open('$TO_DIR/slow1/meta.json'))['timeout'])")
+assert_eq "$to_val" "1" "meta.timeout persists --timeout value (1)"
+
+echo ""
 echo "=== spawn duplicate without --force ==="
 
 mkdir -p "$SP_DIR/exists"

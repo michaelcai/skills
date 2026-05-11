@@ -26,7 +26,21 @@ from typing import Optional
 # ============================================================
 
 DEFAULT_STATE_DIR = Path.home() / ".cache" / "agent-session"
-DEFAULT_TIMEOUT = 600  # seconds
+
+# Subprocess timeout (seconds) for spawn/send/run. Env override lets callers
+# (debate, jam) raise the ceiling when a real backend turn — especially gpt-5.5
+# reasoning models — exceeds the default. Per-call --timeout flag on spawn/run
+# persists into meta.json and takes precedence over the env.
+DEFAULT_TIMEOUT = int(os.environ.get("AGENT_SESSION_TIMEOUT", "1800"))
+
+
+def resolve_timeout(meta_timeout: Optional[int] = None, override: Optional[int] = None) -> int:
+    """Priority: explicit override > meta-persisted > env/default."""
+    if override is not None:
+        return int(override)
+    if meta_timeout is not None:
+        return int(meta_timeout)
+    return DEFAULT_TIMEOUT
 
 
 def state_root(state_dir: Optional[str]) -> Path:
@@ -160,6 +174,7 @@ class Driver(ABC):
         system_prompt: Optional[str],
         cwd: Optional[str],
         yolo: bool,
+        timeout: Optional[int],
     ) -> None: ...
 
     @abstractmethod
@@ -185,6 +200,7 @@ class Driver(ABC):
         system_prompt: Optional[str],
         cwd: Optional[str],
         yolo: bool,
+        timeout: Optional[int],
     ) -> str:
         """One-shot, stateless invocation. Returns assistant text directly.
         No state dir writes. Caller does not pass role-id. Each driver is
@@ -206,12 +222,13 @@ class ClaudeDriver(Driver):
     def detect(cls) -> Optional[str]:
         return shutil.which("claude")
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo):
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo, timeout):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
 
         sid = str(uuid.uuid4())
+        t = resolve_timeout(override=timeout)
 
         r0_in = sd / "input" / "r0.md"
         shutil.copy(prompt_file, r0_in)
@@ -233,14 +250,22 @@ class ClaudeDriver(Driver):
             "system_prompt": system_prompt,
             "cwd": cwd,
             "yolo": yolo,
+            "timeout": timeout,
         }
         write_meta(role_id, state_dir, meta)
 
-        with r0_in.open() as f:
-            result = subprocess.run(
-                cmd, stdin=f, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
-                cwd=cwd,
-            )
+        try:
+            with r0_in.open() as f:
+                result = subprocess.run(
+                    cmd, stdin=f, capture_output=True, text=True, timeout=t,
+                    cwd=cwd,
+                )
+        except subprocess.TimeoutExpired:
+            append_log(role_id, state_dir, f"spawn timeout after {t}s")
+            meta["state"] = "error"
+            meta["error"] = f"timeout after {t}s"
+            write_meta(role_id, state_dir, meta)
+            raise RuntimeError(f"claude spawn timed out after {t}s for role {role_id} (override with --timeout or $AGENT_SESSION_TIMEOUT)")
 
         (sd / "output" / "r0.txt").write_text(result.stdout)
         if result.returncode != 0:
@@ -264,6 +289,7 @@ class ClaudeDriver(Driver):
         n = meta["round_count"]  # next round index
         rN_in = sd / "input" / f"r{n}.md"
         shutil.copy(prompt_file, rN_in)
+        t = resolve_timeout(meta_timeout=meta.get("timeout"))
 
         cmd = ["claude", "-p", "--resume", meta["sid"]]
         if meta.get("model") and meta["model"] != "default":
@@ -271,11 +297,18 @@ class ClaudeDriver(Driver):
         if meta.get("yolo", False):
             cmd += ["--dangerously-skip-permissions"]
 
-        with rN_in.open() as f:
-            result = subprocess.run(
-                cmd, stdin=f, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
-                cwd=meta.get("cwd"),
-            )
+        try:
+            with rN_in.open() as f:
+                result = subprocess.run(
+                    cmd, stdin=f, capture_output=True, text=True, timeout=t,
+                    cwd=meta.get("cwd"),
+                )
+        except subprocess.TimeoutExpired:
+            append_log(role_id, state_dir, f"send r{n} timeout after {t}s")
+            meta["state"] = "error"
+            meta["error"] = f"timeout after {t}s at round {n}"
+            write_meta(role_id, state_dir, meta)
+            raise RuntimeError(f"claude send timed out after {t}s for role {role_id} at round {n} (override with --timeout on spawn or $AGENT_SESSION_TIMEOUT)")
 
         (sd / "output" / f"r{n}.txt").write_text(result.stdout)
         if result.returncode != 0:
@@ -312,7 +345,8 @@ class ClaudeDriver(Driver):
                         shutil.rmtree(d, ignore_errors=True)
         shutil.rmtree(sd, ignore_errors=True)
 
-    def run(self, prompt_file, model, system_prompt, cwd, yolo):
+    def run(self, prompt_file, model, system_prompt, cwd, yolo, timeout):
+        t = resolve_timeout(override=timeout)
         cmd = ["claude", "-p"]
         if model:
             cmd += ["--model", model]
@@ -320,11 +354,14 @@ class ClaudeDriver(Driver):
             cmd += ["--system-prompt", system_prompt]
         if yolo:
             cmd += ["--dangerously-skip-permissions"]
-        with open(prompt_file) as f:
-            result = subprocess.run(
-                cmd, stdin=f, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
-                cwd=cwd,
-            )
+        try:
+            with open(prompt_file) as f:
+                result = subprocess.run(
+                    cmd, stdin=f, capture_output=True, text=True, timeout=t,
+                    cwd=cwd,
+                )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"claude run timed out after {t}s (override with --timeout or $AGENT_SESSION_TIMEOUT)")
         if result.returncode != 0:
             raise RuntimeError(f"claude run failed (rc={result.returncode}): {result.stderr.strip()}")
         return result.stdout
@@ -411,7 +448,8 @@ class OpencodeDriver(Driver):
             )
         return sid, "".join(chunks)
 
-    def _run(self, role_id, state_dir, prompt_text, *, session: Optional[str], model: Optional[str], cwd: Optional[str] = None, yolo: bool = False):
+    def _run(self, role_id, state_dir, prompt_text, *, session: Optional[str], model: Optional[str], cwd: Optional[str] = None, yolo: bool = False, timeout: Optional[int] = None):
+        t = resolve_timeout(override=timeout)
         cmd = [self._opencode(), "run", prompt_text, "--format", "json"]
         if session:
             cmd += ["--session", session]
@@ -426,14 +464,19 @@ class OpencodeDriver(Driver):
         agent_env = os.environ.get("OPENCODE_AGENT")
         if agent_env:
             cmd += ["--agent", agent_env]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=t)
+        except subprocess.TimeoutExpired:
+            if role_id is not None:
+                append_log(role_id, state_dir, f"opencode run timeout after {t}s")
+            raise RuntimeError(f"opencode run timed out after {t}s (override with --timeout or $AGENT_SESSION_TIMEOUT)")
         if result.returncode != 0:
             if role_id is not None:
                 append_log(role_id, state_dir, f"opencode run rc={result.returncode}\nstderr:\n{result.stderr}\nstdout:\n{result.stdout}")
             raise RuntimeError(f"opencode run failed (rc={result.returncode}): {result.stderr.strip() or result.stdout.strip()[:300]}")
         return self._parse_run_output(result.stdout)
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo):
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo, timeout):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
@@ -454,13 +497,16 @@ class OpencodeDriver(Driver):
             "system_prompt": system_prompt,
             "cwd": cwd,
             "yolo": yolo,
+            "timeout": timeout,
         }
         write_meta(role_id, state_dir, meta)
 
         try:
-            sid, text = self._run(role_id, state_dir, prompt_content, session=None, model=model, cwd=cwd, yolo=yolo)
-        except RuntimeError:
-            meta["state"] = "failed"
+            sid, text = self._run(role_id, state_dir, prompt_content, session=None, model=model, cwd=cwd, yolo=yolo, timeout=timeout)
+        except RuntimeError as e:
+            meta["state"] = "failed" if "timed out" not in str(e) else "error"
+            if "timed out" in str(e):
+                meta["error"] = str(e)
             write_meta(role_id, state_dir, meta)
             raise
         if not sid:
@@ -498,9 +544,12 @@ class OpencodeDriver(Driver):
                 model=model,
                 cwd=meta.get("cwd"),
                 yolo=meta.get("yolo", False),
+                timeout=meta.get("timeout"),
             )
-        except RuntimeError:
+        except RuntimeError as e:
             meta["state"] = "error"
+            if "timed out" in str(e):
+                meta["error"] = f"timeout at round {n}: {e}"
             write_meta(role_id, state_dir, meta)
             raise
 
@@ -531,7 +580,7 @@ class OpencodeDriver(Driver):
                 append_log(role_id, state_dir, f"cleanup opencode session delete failed: {e}")
         shutil.rmtree(sd, ignore_errors=True)
 
-    def run(self, prompt_file, model, system_prompt, cwd, yolo):
+    def run(self, prompt_file, model, system_prompt, cwd, yolo, timeout):
         prompt_content = Path(prompt_file).read_text()
         if system_prompt:
             prompt_content = f"<system>\n{system_prompt}\n</system>\n\n{prompt_content}"
@@ -543,6 +592,7 @@ class OpencodeDriver(Driver):
             model=model,
             cwd=cwd,
             yolo=yolo,
+            timeout=timeout,
         )
         if sid:
             try:
@@ -583,12 +633,13 @@ class CodexDriver(Driver):
             flags.append("--dangerously-bypass-approvals-and-sandbox")
         return flags
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo):
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo, timeout):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
 
         session_cwd = Path(cwd).resolve() if cwd else self._session_cwd(role_id, state_dir)
+        t = resolve_timeout(override=timeout)
 
         # Compose prompt (codex has no separate system-prompt flag — prepend if given)
         prompt_content = Path(prompt_file).read_text()
@@ -608,6 +659,7 @@ class CodexDriver(Driver):
             "system_prompt": system_prompt,
             "cwd": str(session_cwd),
             "yolo": yolo,
+            "timeout": timeout,
         }
         write_meta(role_id, state_dir, meta)
 
@@ -619,9 +671,16 @@ class CodexDriver(Driver):
         if model:
             cmd += ["-m", model]
 
-        result = subprocess.run(
-            cmd, input=prompt_content, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
-        )
+        try:
+            result = subprocess.run(
+                cmd, input=prompt_content, capture_output=True, text=True, timeout=t,
+            )
+        except subprocess.TimeoutExpired:
+            append_log(role_id, state_dir, f"spawn timeout after {t}s")
+            meta["state"] = "error"
+            meta["error"] = f"timeout after {t}s"
+            write_meta(role_id, state_dir, meta)
+            raise RuntimeError(f"codex spawn timed out after {t}s for role {role_id} (override with --timeout or $AGENT_SESSION_TIMEOUT)")
         if result.returncode != 0:
             append_log(role_id, state_dir, f"spawn rc={result.returncode}\nstderr:\n{result.stderr}")
             meta["state"] = "failed"
@@ -652,6 +711,7 @@ class CodexDriver(Driver):
         rN_out = sd / "output" / f"r{n}.txt"
 
         cwd = Path(meta.get("cwd") or self._session_cwd(role_id, state_dir))
+        t = resolve_timeout(meta_timeout=meta.get("timeout"))
 
         # send: `codex exec resume` does NOT accept --cd; use subprocess cwd= so that
         # `--last` resolves to the session created in this exact directory by spawn.
@@ -661,10 +721,17 @@ class CodexDriver(Driver):
         if meta.get("model") and meta["model"] != "default":
             cmd += ["-m", meta["model"]]
 
-        result = subprocess.run(
-            cmd, input=prompt_content, capture_output=True, text=True,
-            cwd=str(cwd), timeout=DEFAULT_TIMEOUT,
-        )
+        try:
+            result = subprocess.run(
+                cmd, input=prompt_content, capture_output=True, text=True,
+                cwd=str(cwd), timeout=t,
+            )
+        except subprocess.TimeoutExpired:
+            append_log(role_id, state_dir, f"send r{n} timeout after {t}s")
+            meta["state"] = "error"
+            meta["error"] = f"timeout after {t}s at round {n}"
+            write_meta(role_id, state_dir, meta)
+            raise RuntimeError(f"codex send timed out after {t}s for role {role_id} at round {n} (override with --timeout on spawn or $AGENT_SESSION_TIMEOUT)")
         if result.returncode != 0:
             append_log(role_id, state_dir, f"send r{n} rc={result.returncode}\nstderr:\n{result.stderr}")
             meta["state"] = "error"
@@ -693,7 +760,7 @@ class CodexDriver(Driver):
         # (they get GC'd by codex itself or stay harmless). Just nuke our state dir.
         shutil.rmtree(sd, ignore_errors=True)
 
-    def run(self, prompt_file, model, system_prompt, cwd, yolo):
+    def run(self, prompt_file, model, system_prompt, cwd, yolo, timeout):
         raise NotImplementedError(
             "codex driver `run()` not implemented yet — "
             "this jam (agent-session-generic-entry) ships opencode + claude only. "
@@ -889,6 +956,7 @@ def cmd_spawn(args) -> int:
             args.system_prompt,
             args.cwd,
             args.yolo,
+            args.timeout,
         )
     return 0
 
@@ -915,6 +983,7 @@ def cmd_run(args) -> int:
             args.system_prompt,
             args.cwd,
             args.yolo,
+            args.timeout,
         )
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
@@ -1028,6 +1097,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--force", action="store_true")
     p_spawn.add_argument("--cwd")
     p_spawn.add_argument("--yolo", action="store_true")
+    p_spawn.add_argument("--timeout", type=int,
+                         help="subprocess timeout in seconds; persists to meta.json so send inherits it. Falls back to $AGENT_SESSION_TIMEOUT (default 1800).")
 
     p_run = sub.add_parser(
         "run",
@@ -1039,6 +1110,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--system-prompt")
     p_run.add_argument("--cwd")
     p_run.add_argument("--yolo", action="store_true")
+    p_run.add_argument("--timeout", type=int,
+                       help="subprocess timeout in seconds. Falls back to $AGENT_SESSION_TIMEOUT (default 1800).")
 
     p_send = sub.add_parser("send", help="continue an existing session")
     p_send.add_argument("--role-id", "--session-id", dest="role_id", required=True)
