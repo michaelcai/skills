@@ -24,6 +24,33 @@ from typing import Optional
 DEFAULT_STANCE_WHITELIST = frozenset({"hold", "concede", "add"})
 
 
+# Patterns indicating the backend's underlying session has been GC'd or expired.
+# Detection short-circuits the generic RuntimeError path so callers can distinguish
+# "session vanished, rebuild it" from "send failed for some other reason".
+SESSION_NOT_FOUND_PATTERNS = (
+    "No conversation found with session ID",   # claude CLI
+    # NB: extend here when other backends are observed to expire sessions.
+)
+
+
+def _is_session_not_found(err_text: str) -> bool:
+    return any(pat in (err_text or "") for pat in SESSION_NOT_FOUND_PATTERNS)
+
+
+class SessionNotFoundError(RuntimeError):
+    """Raised by Driver.send when the backend reports the underlying session is gone.
+
+    Distinct from generic RuntimeError so cmd_send / main can return exit 3 with a
+    structured JSON body, letting orchestrators (e.g. debate) reconcile without
+    parsing stderr strings.
+    """
+    def __init__(self, role_id: str, backend: str, raw_error: str):
+        super().__init__(f"session-not-found: {backend} reports backing session gone for {role_id}")
+        self.role_id = role_id
+        self.backend = backend
+        self.raw_error = raw_error
+
+
 # ============================================================
 # State
 # ============================================================
@@ -182,6 +209,7 @@ class Driver(ABC):
         cwd: Optional[str],
         yolo: bool,
         timeout: Optional[int],
+        initial_round: int = 1,
     ) -> None: ...
 
     @abstractmethod
@@ -235,7 +263,7 @@ class ClaudeDriver(Driver):
     def detect(cls) -> Optional[str]:
         return shutil.which("claude")
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo, timeout):
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo, timeout, initial_round=1):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
@@ -287,7 +315,7 @@ class ClaudeDriver(Driver):
             write_meta(role_id, state_dir, meta)
             raise RuntimeError(f"claude spawn failed (rc={result.returncode}): {result.stderr.strip()}")
 
-        meta["round_count"] = 1
+        meta["round_count"] = initial_round
         meta["state"] = "active"
         write_meta(role_id, state_dir, meta)
 
@@ -325,10 +353,16 @@ class ClaudeDriver(Driver):
 
         (sd / "output" / f"r{n}.txt").write_text(result.stdout)
         if result.returncode != 0:
+            err_text = result.stderr.strip()
             append_log(role_id, state_dir, f"send r{n} rc={result.returncode}\nstderr:\n{result.stderr}")
+            if _is_session_not_found(err_text):
+                meta["state"] = "session_lost"
+                meta["error"] = err_text[:500]
+                write_meta(role_id, state_dir, meta)
+                raise SessionNotFoundError(role_id=role_id, backend="claude", raw_error=err_text)
             meta["state"] = "error"
             write_meta(role_id, state_dir, meta)
-            raise RuntimeError(f"claude send failed (rc={result.returncode}): {result.stderr.strip()}")
+            raise RuntimeError(f"claude send failed (rc={result.returncode}): {err_text}")
 
         meta["round_count"] = n + 1
         write_meta(role_id, state_dir, meta)
@@ -338,7 +372,7 @@ class ClaudeDriver(Driver):
         meta = read_meta(role_id, state_dir)
         if not meta:
             return "error"
-        return {"spawning": "running", "active": "done", "failed": "error", "error": "error"}.get(
+        return {"spawning": "running", "active": "done", "failed": "error", "error": "error", "session_lost": "session_lost"}.get(
             meta["state"], "error"
         )
 
@@ -489,7 +523,7 @@ class OpencodeDriver(Driver):
             raise RuntimeError(f"opencode run failed (rc={result.returncode}): {result.stderr.strip() or result.stdout.strip()[:300]}")
         return self._parse_run_output(result.stdout)
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo, timeout):
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo, timeout, initial_round=1):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
@@ -529,7 +563,7 @@ class OpencodeDriver(Driver):
 
         (sd / "output" / "r0.txt").write_text(text)
         meta["sid"] = sid
-        meta["round_count"] = 1
+        meta["round_count"] = initial_round
         meta["state"] = "active"
         write_meta(role_id, state_dir, meta)
 
@@ -561,8 +595,14 @@ class OpencodeDriver(Driver):
                 timeout=effective_timeout,
             )
         except RuntimeError as e:
+            err_text = str(e)
+            if _is_session_not_found(err_text):
+                meta["state"] = "session_lost"
+                meta["error"] = err_text[:500]
+                write_meta(role_id, state_dir, meta)
+                raise SessionNotFoundError(role_id=role_id, backend="opencode", raw_error=err_text)
             meta["state"] = "error"
-            if "timed out" in str(e):
+            if "timed out" in err_text:
                 meta["error"] = f"timeout at round {n}: {e}"
             write_meta(role_id, state_dir, meta)
             raise
@@ -575,7 +615,7 @@ class OpencodeDriver(Driver):
         meta = read_meta(role_id, state_dir)
         if not meta:
             return "error"
-        return {"spawning": "running", "active": "done", "failed": "error", "error": "error"}.get(
+        return {"spawning": "running", "active": "done", "failed": "error", "error": "error", "session_lost": "session_lost"}.get(
             meta["state"], "error"
         )
 
@@ -647,7 +687,7 @@ class CodexDriver(Driver):
             flags.append("--dangerously-bypass-approvals-and-sandbox")
         return flags
 
-    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo, timeout):
+    def spawn(self, role_id, prompt_file, model, state_dir, system_prompt, cwd, yolo, timeout, initial_round=1):
         sd = session_dir(role_id, state_dir)
         (sd / "input").mkdir(parents=True, exist_ok=True)
         (sd / "output").mkdir(parents=True, exist_ok=True)
@@ -707,7 +747,7 @@ class CodexDriver(Driver):
             write_meta(role_id, state_dir, meta)
             raise RuntimeError("codex exec produced no output")
 
-        meta["round_count"] = 1
+        meta["round_count"] = initial_round
         meta["state"] = "active"
         write_meta(role_id, state_dir, meta)
 
@@ -747,10 +787,16 @@ class CodexDriver(Driver):
             write_meta(role_id, state_dir, meta)
             raise RuntimeError(f"codex send timed out after {t}s for role {role_id} at round {n} (override with --timeout on spawn or $AGENT_SESSION_TIMEOUT)")
         if result.returncode != 0:
+            err_text = result.stderr.strip()
             append_log(role_id, state_dir, f"send r{n} rc={result.returncode}\nstderr:\n{result.stderr}")
+            if _is_session_not_found(err_text):
+                meta["state"] = "session_lost"
+                meta["error"] = err_text[:500]
+                write_meta(role_id, state_dir, meta)
+                raise SessionNotFoundError(role_id=role_id, backend="codex", raw_error=err_text)
             meta["state"] = "error"
             write_meta(role_id, state_dir, meta)
-            raise RuntimeError(f"codex exec resume failed (rc={result.returncode}): {result.stderr.strip()}")
+            raise RuntimeError(f"codex exec resume failed (rc={result.returncode}): {err_text}")
 
         if not rN_out.exists() or rN_out.stat().st_size == 0:
             raise RuntimeError("codex exec resume produced no output")
@@ -762,7 +808,7 @@ class CodexDriver(Driver):
         meta = read_meta(role_id, state_dir)
         if not meta:
             return "error"
-        return {"spawning": "running", "active": "done", "failed": "error", "error": "error"}.get(
+        return {"spawning": "running", "active": "done", "failed": "error", "error": "error", "session_lost": "session_lost"}.get(
             meta["state"], "error"
         )
 
@@ -941,6 +987,10 @@ def cmd_describe(args) -> int:
 
 
 def cmd_spawn(args) -> int:
+    if args.initial_round < 1:
+        print(f"--initial-round must be >= 1, got {args.initial_round}", file=sys.stderr)
+        return 2
+
     sd = session_dir(args.role_id, args.state_dir)
     if sd.exists() and not args.force:
         print(f"session already exists: {args.role_id} (use --force to overwrite)", file=sys.stderr)
@@ -971,6 +1021,7 @@ def cmd_spawn(args) -> int:
             args.cwd,
             args.yolo,
             args.timeout,
+            args.initial_round,
         )
     return 0
 
@@ -1138,6 +1189,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--yolo", action="store_true")
     p_spawn.add_argument("--timeout", type=int,
                          help="subprocess timeout in seconds; persists to meta.json so send inherits it. Falls back to $AGENT_SESSION_TIMEOUT (default 1800).")
+    p_spawn.add_argument(
+        "--initial-round",
+        type=int,
+        default=1,
+        help="seed meta.round_count after spawn (default 1). Use to align "
+             "rebuilt sessions with peer sessions still at higher rounds — "
+             "e.g. debate reconcile after a session-lost error.",
+    )
 
     p_run = sub.add_parser(
         "run",
@@ -1211,6 +1270,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return HANDLERS[args.command](args)
+    except SessionNotFoundError as e:
+        print(json.dumps({
+            "error": "session-not-found",
+            "role_id": e.role_id,
+            "backend": e.backend,
+            "raw_error": e.raw_error[:500],
+        }))
+        return 3
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 1

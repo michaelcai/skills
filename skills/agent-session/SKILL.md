@@ -136,6 +136,7 @@ Creates a new session and runs the first turn.
 | `--cwd` | no | Working directory for the backend subprocess. claude inherits via subprocess cwd; opencode uses `--dir`; codex uses `--cd`. |
 | `--yolo` | no | Bypass permission prompts (`--dangerously-skip-permissions` on claude/opencode, `--dangerously-bypass-approvals-and-sandbox` on codex). For autonomous Agent invocations, see references/backend-<name>.md for default-mode behavior. |
 | `--timeout` | no | Subprocess timeout in seconds. Persists to `meta.json` so `send` inherits it for follow-up rounds. Priority: explicit `--timeout` > meta-persisted > `$AGENT_SESSION_TIMEOUT` > default 1800s. |
+| `--initial-round N` | no | Seed `meta.round_count` to N (default 1); used by reconcile flows to align rebuilt session with peers at higher rounds. |
 
 stdout: nothing significant on success (caller reads via `output --round 0`). Non-zero exit on failure; stderr explains. On `subprocess.TimeoutExpired` the state is marked `error`, `meta.error` records the timeout, and a clean `RuntimeError` (exit 1) describes the override mechanism.
 
@@ -179,6 +180,21 @@ stdout: nothing on success; caller reads via `output --round N`.
 | `--state-dir` | no | Same value used at `spawn` |
 | `--timeout` | no | Override the ceiling for this send AND persist it back to `meta.json` so subsequent sends inherit. Priority: `--timeout` > meta-persisted (from spawn or a previous `send --timeout`) > `$AGENT_SESSION_TIMEOUT` > 1800s. |
 | `--force` | no | Recover a session stuck in `state=error` (typically from a previous timeout). Moves `meta.error` aside to `meta.last_error` and re-attempts. The retry may still fail — that's fine, you get an explicit attempt instead of being permanently blocked. |
+
+### Exit codes (send)
+
+| code | 含义 | 调用方该做什么 |
+|---|---|---|
+| 0 | 成功 | 读 output |
+| 1 | 普通错误（backend rc != 0、网络、auth 等） | 看 stderr，决定重试还是放弃 |
+| 2 | 用法错误（session 不存在、参数无效） | 修参数 |
+| 3 | **session-not-found**：backend 端 session 已 GC（如 claude CLI session TTL 失效）| 解析 stdout JSON，cleanup + 重 spawn（可用 `--initial-round N` 对齐 round）+ replay 历史 |
+
+exit 3 的 stdout 是 JSON：
+
+```json
+{"error": "session-not-found", "role_id": "...", "backend": "claude", "raw_error": "..."}
+```
 
 ### Timeout
 

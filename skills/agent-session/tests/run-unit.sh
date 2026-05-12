@@ -413,6 +413,84 @@ assert_rc $rc 2 "empty --stance-whitelist exits 2"
 assert_contains "$out" "empty stance whitelist" "empty whitelist stderr says so"
 
 echo ""
+echo "=== Batch C: spawn --initial-round ==="
+
+# C1: default (no --initial-round) → meta.round_count == 1
+# We set up a fake claude that returns immediately successfully.
+FAKE_BIN2="$TMPDIR_BASE/fake-bin2"
+mkdir -p "$FAKE_BIN2"
+cat > "$FAKE_BIN2/claude" <<'FAKE'
+#!/usr/bin/env bash
+echo "hello from fake claude"
+exit 0
+FAKE
+chmod +x "$FAKE_BIN2/claude"
+
+IR_DIR="$TMPDIR_BASE/initial-round"
+
+out=$(PATH="$FAKE_BIN2:$PATH" "$AS" spawn --backend claude --role-id ir-default \
+       --prompt-file "$TMPDIR_BASE/p.md" --state-dir "$IR_DIR" 2>&1)
+rc=$?
+assert_rc $rc 0 "C1: spawn (no --initial-round) exits 0"
+rc_val=$(python3 -c "import json;print(json.load(open('$IR_DIR/ir-default/meta.json'))['round_count'])")
+assert_eq "$rc_val" "1" "C1: default spawn sets round_count=1"
+
+# C2: spawn with --initial-round 5 → meta.round_count == 5
+out=$(PATH="$FAKE_BIN2:$PATH" "$AS" spawn --backend claude --role-id ir-five \
+       --prompt-file "$TMPDIR_BASE/p.md" --state-dir "$IR_DIR" --initial-round 5 2>&1)
+rc=$?
+assert_rc $rc 0 "C2: spawn --initial-round 5 exits 0"
+rc_val=$(python3 -c "import json;print(json.load(open('$IR_DIR/ir-five/meta.json'))['round_count'])")
+assert_eq "$rc_val" "5" "C2: spawn --initial-round 5 sets round_count=5"
+
+# C3: spawn with --initial-round 0 → exit 2, stderr contains "must be >= 1"
+out=$(PATH="$FAKE_BIN2:$PATH" "$AS" spawn --backend claude --role-id ir-zero \
+       --prompt-file "$TMPDIR_BASE/p.md" --state-dir "$IR_DIR" --initial-round 0 2>&1)
+rc=$?
+assert_rc $rc 2 "C3: spawn --initial-round 0 exits 2"
+assert_contains "$out" "must be >= 1" "C3: spawn --initial-round 0 stderr says 'must be >= 1'"
+
+# C4: spawn with --initial-round -1 → exit 2
+out=$(PATH="$FAKE_BIN2:$PATH" "$AS" spawn --backend claude --role-id ir-neg \
+       --prompt-file "$TMPDIR_BASE/p.md" --state-dir "$IR_DIR" --initial-round -1 2>&1)
+rc=$?
+assert_rc $rc 2 "C4: spawn --initial-round -1 exits 2"
+
+echo ""
+echo "=== Batch D: session-not-found detection ==="
+
+python3 - <<PY
+import sys
+from importlib.machinery import SourceFileLoader
+m = SourceFileLoader("agent_session", "$SCRIPT_DIR/../bin/agent-session").load_module()
+fn = m._is_session_not_found
+
+# D1: pattern present -> True
+assert fn("No conversation found with session ID: abc-123"), "D1: known pattern -> True"
+# D2a: empty string -> False
+assert not fn(""), "D2a: empty string -> False"
+# D2b: None -> False
+assert not fn(None), "D2b: None -> False"
+# D3: unrelated error -> False
+assert not fn("totally unrelated error message"), "D3: unrelated message -> False"
+print("PY D1-D3 OK")
+PY
+rc=$?
+assert_rc $rc 0 "D1-D3: _is_session_not_found helper correctness"
+
+python3 - <<PY
+import sys
+from importlib.machinery import SourceFileLoader
+m = SourceFileLoader("agent_session", "$SCRIPT_DIR/../bin/agent-session").load_module()
+fn = m._is_session_not_found
+# D5: opencode-style error message -> True (pattern is backend-agnostic)
+assert fn("OpenCode some error: No conversation found with session ID: xyz"), "D5: opencode error shape -> True"
+print("PY D5 OK")
+PY
+rc=$?
+assert_rc $rc 0 "D5: _is_session_not_found matches opencode-style session-not-found error"
+
+echo ""
 echo "================================================"
 echo "Result: $PASS passed, $FAIL failed"
 echo "================================================"
