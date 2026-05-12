@@ -135,3 +135,37 @@ modules:
     invariants:
       - { kind: contains_all, values: ["preset: deliberation", "role-topology:", "stance-contract:", "checkpoint-policy:", "output-format:"] }
       - { kind: contains,     value: "trade-off" }
+
+  # SKILL.md orchestration discipline invariants
+  # Prevent regression of 2026-05-12 root-cause patterns
+  - id: skill-orchestration-discipline
+    path: SKILL.md
+    loaded_by: moderator-optional
+    purpose: "SKILL.md itself — checked for forbidden orchestration patterns and required reconcile surface"
+    invariants:
+      - kind: forbidden
+        value: "ScheduleWakeup("
+        # debate orchestration must use foreground & wait for parallel sends.
+        # ScheduleWakeup blind-waits cannot detect a hung wrapper.
+        # Note: the word "ScheduleWakeup" may appear in §Red Flags as a warning;
+        # only the invocation pattern ScheduleWakeup( is forbidden.
+      - kind: forbidden
+        value: "run_in_background`"
+        # Bash run_in_background + internal & creates double-bg wrapper hang.
+        # See §Red Flags #1.
+        # Note: run_in_background may appear in §Red Flags as a warning label;
+        # only the backtick-invocation form (as used in instructions) is forbidden.
+      - kind: contains_all
+        values:
+          - "send fan-out 嵌套 Bash"
+          - "ScheduleWakeup 等 debate"
+          - "debate orchestration 本身放后台"
+          - "wait` 拼接变量"
+        # §Red Flags must enumerate the 4 forbidden patterns from 2026-05-12
+        # debate runtime root-cause analysis.
+      - kind: contains_all
+        values:
+          - "exit 3"
+          - "session-not-found"
+          - "--initial-round"
+        # Reconcile section must reference the agent-session CLI surface area.

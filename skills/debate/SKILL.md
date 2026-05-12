@@ -122,7 +122,8 @@ Tokens: ~Xk used / ~52k planned (estimate)
 DEBATE_ID=$(date +%s%N | md5sum | head -c4)
 DEBATE_DIR="/tmp/debate-${DEBATE_ID}"
 SESSIONS_DIR="${DEBATE_DIR}/sessions"
-mkdir -p "$SESSIONS_DIR"
+TLDRS_HISTORY="${DEBATE_DIR}/tldrs-history"  # NEW: per-role accumulated TL;DRs for reconcile
+mkdir -p "$SESSIONS_DIR" "$TLDRS_HISTORY"
 ```
 
 `SESSIONS_DIR` is the shared state directory passed to every `spawn` / `send` / `output` / `cleanup` call. Cleanup is `rm -rf "$DEBATE_DIR"`.
@@ -339,6 +340,9 @@ for r in "${ACTIVE_ROLES[@]}"; do
     --stance-whitelist "$STANCE_WHITELIST")
   echo "$json" | jq -r '.tldr_text // ""' > "$DEBATE_DIR/tldrs/$r.md"
   echo "$json" | jq -r '.stance    // "null"' > "$DEBATE_DIR/stances/$r.txt"
+  # Also append to per-role accumulated history (for reconcile re-spawn context)
+  mkdir -p "$TLDRS_HISTORY/$r"
+  echo "$json" | jq -r '.tldr_text // ""' > "$TLDRS_HISTORY/$r/r${N}.md"
 done
 ```
 
@@ -354,7 +358,32 @@ The focus bullets are the **only** content from this round that the moderator ty
 
 ##### Send (parallel)
 
-Pass the SAME `rN.md` to every role via agent-session's `send` verb, dispatched **in parallel**. Sequential within-round dispatch is not required — the prompt only references round N-1, so there's no in-round dialogue — and roughly doubles wall-clock.
+Pass the same `rN.md` to every role via agent-session's `send` verb,
+dispatched in parallel.
+
+**[MUST] Dispatch pattern is foreground `& wait`. Never wrap in Bash
+`run_in_background`.**
+
+```bash
+# correct — foreground parallel
+for r in $ACTIVE_ROLES; do
+  agent-session send --role-id "$r" \
+    --state-dir "$SESSIONS_DIR" \
+    --prompt-file "$DEBATE_DIR/r${N}.md" \
+    --timeout 1800 > "$DEBATE_DIR/logs/send-${r}-r${N}.log" 2>&1 &
+  pids+=("$!")
+done
+for pid in "${pids[@]}"; do
+  wait "$pid"   # NB: each pid independently quoted — never wait "${pid}${suffix}"
+done
+```
+
+Why foreground: Bash tool `run_in_background` + internal `&` creates a
+double-bg situation where the harness severs the wrapper's stdio/job
+control, the wrapper hangs at 0% CPU, and the child processes never start.
+Confirmed in 2026-05-12 debate run (13 min wait for sends that never
+launched). 4 parallel 30-60s sends fit comfortably within Bash tool's
+default 120s timeout.
 
 **[MUST] Collect per-role exit codes AND verify output.** A bare `wait` without arguments only waits, it doesn't surface individual failures. A round where `agent-session send` rejected a flag (e.g. `unrecognized arguments`) silently and `tldr` later returns the *previous round's* cached output is the classic false-success trap. Use this hardened pattern:
 
@@ -363,14 +392,16 @@ pids=()
 for r in "${ACTIVE_ROLES[@]}"; do
   agent-session send --role-id "$r" \
     --prompt-file "$DEBATE_DIR/rN.md" \
-    --state-dir "$SESSIONS_DIR" &
-  pids+=("$!:$r")
+    --state-dir "$SESSIONS_DIR" \
+    --timeout 1800 > "$DEBATE_DIR/logs/send-${r}-rN.log" 2>&1 &
+  pids+=("$!")
+  role_for_pid["$!"]="$r"
 done
 
 failed=()
-for entry in "${pids[@]}"; do
-  pid="${entry%%:*}"; role="${entry##*:}"
-  wait "$pid" || failed+=("$role:rc=$?")
+for pid in "${pids[@]}"; do
+  r="${role_for_pid[$pid]}"
+  wait "$pid" || failed+=("$r:rc=$?")
 done
 
 # Belt + suspenders: even a 0-exit send is suspect if output is empty or missing the format marker.
@@ -398,6 +429,54 @@ done
 If you want Defender to rebut this-round critic arguments, do it as an **optional follow-up half-round** (one extra `send` to Defender after collecting the others' r_N), not by ordering the main round. Reserve for the round just before a checkpoint.
 
 For tmux split panes (visualization, not parallelism — sends already run concurrently): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
+
+#### [MUST] Reconcile on session-not-found
+
+If any `agent-session send` returns **exit 3** during round N, the backend
+reports the role's session has been GC'd (most commonly: claude CLI's
+session TTL, observed to expire by ~22min idle in 2026-05-12 testing).
+
+The send's stdout is JSON:
+
+```json
+{"error": "session-not-found", "role_id": "role-a", "backend": "claude", "raw_error": "..."}
+```
+
+Recovery is moderator-driven (agent-session is a thin wrapper — it doesn't
+know the role's context). Per affected role:
+
+```bash
+# 1. cleanup the dead session (idempotent)
+agent-session cleanup --role-id "$r" --state-dir "$SESSIONS_DIR"
+
+# 2. recompose first-turn prompt: shared-context + role identity + all prior
+#    round TL;DRs of THIS role (in $DEBATE_DIR/tldrs-history/${r}/*.md)
+cat "$DEBATE_DIR/shared-context.md" \
+    "$DEBATE_DIR/roles/${r}.md" \
+    "$DEBATE_DIR/tldrs-history/${r}/"*.md \
+    > "$DEBATE_DIR/recover-${r}.md"
+
+# 3. re-spawn with --initial-round set to this role's expected current round.
+#    This keeps round_count aligned with peer roles still at round N.
+agent-session spawn \
+  --backend "$backend" --model "$model" \
+  --role-id "$r" --state-dir "$SESSIONS_DIR" \
+  --system-prompt "$SYS" --prompt-file "$DEBATE_DIR/recover-${r}.md" \
+  --initial-round "$N" \
+  --timeout 1800
+```
+
+Then continue round N's send fan-out as normal — this role's spawn (which
+internally runs the first turn) replaces the failed send.
+
+**Why this design**:
+- agent-session stays thin: it doesn't persist the original spawn prompt or
+  know how to "replay" — debate owns the round-history bookkeeping
+- `--initial-round` is the only state debate has to thread through;
+  everything else (output extraction, TL;DR fetching) already works
+  unchanged once round_count is aligned
+- No keepalive needed: session-lost is detected on next send and recovered
+  in one round of overhead (vs. periodic ping wasting tokens forever)
 
 ##### Partial-success rounds
 
@@ -614,6 +693,33 @@ For **deliberation**:
 Debate ends by terminating every role session it created (use agent-session's `cleanup` verb per role) and removing its own scratch workspace (`$DEBATE_DIR` from §2.1). Cleanup must be idempotent — repeating it is a no-op; ignore "session not found" errors.
 
 For tmux split mode see [`references/parallel-tmux.md`](./references/parallel-tmux.md) for its analogous cleanup.
+
+---
+
+## Red Flags
+
+**绝对不要**：
+
+1. **send fan-out 嵌套 Bash `run_in_background`**：双层 bg 会让 harness 切断
+   wrapper 进程的 stdio/job control，wrapper 在 0% CPU 挂死，子进程从未启动。
+   2026-05-12 debate run 验证：13min 等待，r2-pids.txt 0 字节，无 agent-session
+   子进程被起。**正确做法**：前台 shell 内部 `& wait`，4 并发 send 在 30-60s
+   内返回，符合 Bash tool 默认 120s timeout。
+
+2. **用 ScheduleWakeup 等 debate 多 role send**：盲等卡死的进程会浪费完整
+   wakeup 周期才发现问题。2026-05-12 debate run 验证：140s wakeup 后回来发现
+   send 早已卡死、永远不会推进，浪费 13min。**正确做法**：foreground `wait`
+   PID（见 §Round N pattern），send 失败/超时立刻可见。
+
+3. **任何把 debate orchestration 本身放后台跑**：主 agent 不能用
+   `run_in_background` 包 /debate 调用。debate 是同步流程，所有 spawn/send/
+   checkpoint 都在 main agent 的前台流里。后台化 orchestrator 会复活 #1 的
+   wrapper hang 问题。
+
+4. **`wait` 拼接变量不加分隔**：`wait "$pid$role"` 被 shell 解析为单变量名
+   `$pidrole`，找不到对应 PID 报 `job not found: 65081ole-a`（拼接 PID + role
+   name 后丢前导字符）。**正确做法**：`wait "$pid"` —— 每个变量独立 quote，
+   永远不在 wait 参数里串变量。如需打日志拼字符串，用其他变量分开处理。
 
 ---
 
