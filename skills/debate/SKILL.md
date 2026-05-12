@@ -223,6 +223,8 @@ Synthesizer → cross-family from majority of stakeholders
                diversity is its structural function)
 ```
 
+**Example**: 3 stakeholders, 2 are claude-family → synthesizer must be a non-claude family (e.g. openai). 2 stakeholders, both claude-family → synthesizer must NOT be claude-family. 2 stakeholders of different families → synthesizer can be either family.
+
 Model resolution follows the same priority chain as Persuasion (env → pool → default).
 
 Stakeholder identity at spawn = `<slug>: <1-line description>` from preflight, prepended to the role's first-turn prompt.
@@ -281,6 +283,19 @@ Debate needs a **persistent multi-turn session per role**, with shared lifetime 
 case "$PRESET" in
   persuasion)   STANCE_WHITELIST="hold,concede,add" ;;
   deliberation) STANCE_WHITELIST="prefer,accept,oppose,abstain" ;;
+esac
+
+# Used in Round N send (parallel pids[]), output verification, and After-round tldr extraction loops
+# Per-preset role list — used in Round N send/verify loops and After-round tldr extraction
+case "$PRESET" in
+  persuasion)
+    ACTIVE_ROLES=(defender role-a role-b wildcard)
+    # role-b conditional per §2.3-a; remove from array if topic doesn't justify a second focused angle
+    ;;
+  deliberation)
+    ACTIVE_ROLES=("${STAKEHOLDER_SLUGS[@]}" synthesizer)
+    # STAKEHOLDER_SLUGS is the confirmed stakeholder list from preflight §1.5
+    ;;
 esac
 
 # When extracting TL;DRs after each round, pass the whitelist:
@@ -478,6 +493,8 @@ Re-spawning is expensive (loses the role's full conversation history) and readin
 For **persuasion**: every 3 rounds (unchanged).
 
 For **deliberation**: all stakeholders have contributed ≥1 round AND (round_count ≥ 3 OR all stances ∈ {prefer, accept}).
+
+**Example**: 3 stakeholders, round 2, stances `{prefer, accept, prefer}` → fires (all contributed AND all-prefer-accept; trade-off resolved). Same setup at round 2 with stances `{prefer, oppose, accept}` → does NOT fire (need round ≥ 3 because the `oppose` indicates unresolved tension worth more rounds).
 
 The checkpoint display also differs:
 - Persuasion: Consensus / Divergence / Moderator judgment / You decide (unchanged).
