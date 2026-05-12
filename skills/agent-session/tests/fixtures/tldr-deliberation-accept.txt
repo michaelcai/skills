@@ -1,0 +1,8 @@
+Some role's reply content here.
+
+## TL;DR
+Sample content for this stance value.
+[stance: accept]
+
+## Argument
+Body text for the accept deliberation stance fixture, with enough words to be realistic for tests.

@@ -1,0 +1,8 @@
+Some role's reply content here.
+
+## TL;DR
+Sample content for this stance value.
+[stance: prefer]
+
+## Argument
+Body text for the prefer deliberation stance fixture, with enough words to be realistic for tests.

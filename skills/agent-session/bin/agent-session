@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Optional
 
 
+DEFAULT_STANCE_WHITELIST = ("hold", "concede", "add")
+
+
 # ============================================================
 # State
 # ============================================================
@@ -86,15 +89,15 @@ def lock(role_id: str, state_dir: Optional[str]):
         lf.unlink(missing_ok=True)
 
 
-def _extract_tldr_and_stance(text: str) -> dict:
+def _extract_tldr_and_stance(text: str, whitelist: tuple[str, ...] = DEFAULT_STANCE_WHITELIST) -> dict:
     """Extract debate's TL;DR section and stance tag from a role's latest output.
 
     Returns {"tldr_text": str | None, "stance": str | None}.
     `tldr_text` is the content between '## TL;DR' (exclusive of the header line)
     and the next '## ' heading or end-of-text, with any trailing whitelisted stance
-    tag (`[stance: hold|concede|add]`) stripped, then trimmed.
-    `stance` is one of 'hold' | 'concede' | 'add' if a `[stance: <word>]` tag
-    is present anywhere in the text with a whitelisted value; None otherwise.
+    tag stripped, then trimmed.
+    `stance` is the `[stance: <word>]` tag value if present anywhere in the text
+    with a whitelisted value; None otherwise.
     Note: invalid stance values (e.g. `[stance: maybe]`) stay in `tldr_text` —
     the helper does not try to clean malformed output.
     """
@@ -109,13 +112,17 @@ def _extract_tldr_and_stance(text: str) -> dict:
     tldr_text = tldr_match.group(1).strip() if tldr_match else None
     # Remove any trailing stance tag line from tldr_text, then trim again
     if tldr_text:
-        tldr_text = re.sub(r'\n?\[stance:\s*(hold|concede|add)\s*\]\s*$', '', tldr_text)
+        trailing_stance_match = re.search(r'\n?\[stance:\s*(\w+)\s*\]\s*$', tldr_text)
+        if trailing_stance_match and trailing_stance_match.group(1) in whitelist:
+            tldr_text = tldr_text[:trailing_stance_match.start()]
         tldr_text = tldr_text.strip()
     stance_match = re.search(
-        r"\[stance:\s*(hold|concede|add)\s*\]",
+        r"\[stance:\s*(\w+)\s*\]",
         text,
     )
     stance = stance_match.group(1) if stance_match else None
+    if stance not in whitelist:
+        stance = None
     return {"tldr_text": tldr_text, "stance": stance}
 
 
@@ -1076,7 +1083,10 @@ def cmd_tldr(args) -> int:
     if not text.strip():
         print(json.dumps({"error": "empty output", "role_id": args.role_id, "round": n}), file=sys.stderr)
         return 2
-    extracted = _extract_tldr_and_stance(text)
+    whitelist = DEFAULT_STANCE_WHITELIST
+    if args.stance_whitelist:
+        whitelist = tuple(s.strip() for s in args.stance_whitelist.split(",") if s.strip())
+    extracted = _extract_tldr_and_stance(text, whitelist=whitelist)
     print(json.dumps({
         "role_id": args.role_id,
         "round_count": meta.get("round_count", 0),
@@ -1163,6 +1173,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_tldr.add_argument("--role-id", "--session-id", dest="role_id", required=True)
     p_tldr.add_argument("--state-dir")
     p_tldr.add_argument("--round", type=int)
+    p_tldr.add_argument(
+        "--stance-whitelist",
+        type=str,
+        default=None,
+        help="comma-separated allowed stance values (e.g. 'hold,concede,add'). "
+             "Default if omitted: hold,concede,add. Values not in the whitelist "
+             "are returned as null (format drift signal).",
+    )
 
     p_cleanup = sub.add_parser("cleanup", help="close session and remove state")
     p_cleanup.add_argument("--role-id", "--session-id", dest="role_id", required=True)

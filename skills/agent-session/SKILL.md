@@ -207,6 +207,17 @@ agent-session output --role-id role-a --round 2    # round 2 specifically
 
 stdout: full text of the assistant message (no trimming, no JSON wrapping).
 
+### `tldr`
+
+Extracts debate-style `## TL;DR` content and stance as JSON from a role's output.
+
+| Arg | Required | Notes |
+|---|---|---|
+| `--role-id` / `--session-id` | yes | Existing session identifier |
+| `--state-dir` | no | Same value used at `spawn` |
+| `--round` | no | Output round to inspect; defaults to latest round |
+| `--stance-whitelist` | no | Comma-separated allowed stance values. Default: `hold,concede,add` (preserves existing callers). Pass `prefer,accept,oppose,abstain` for Deliberation mode in /debate, or any other vocab. Values not in the whitelist surface as `null` (format-drift signal). |
+
 ### `cleanup`
 
 Closes the backend session and deletes the state directory. Idempotent.

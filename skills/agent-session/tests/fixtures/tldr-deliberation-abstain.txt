@@ -1,0 +1,8 @@
+Some role's reply content here.
+
+## TL;DR
+Sample content for this stance value.
+[stance: abstain]
+
+## Argument
+Body text for the abstain deliberation stance fixture, with enough words to be realistic for tests.

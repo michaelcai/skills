@@ -362,6 +362,41 @@ assert_rc $rc 2 "tldr ghost: exit 2"
 assert_contains "$out" "session not found" "tldr ghost: stderr says 'session not found'"
 
 echo ""
+echo "Test: tldr --stance-whitelist (deliberation vocab)"
+
+DELIB_WHITELIST="prefer,accept,oppose,abstain"
+
+# Cases 1-4: each deliberation stance with matching whitelist -> recognized
+for stance in prefer accept oppose abstain; do
+  setup_tldr_session "delib-$stance" "tldr-deliberation-$stance.txt"
+  out=$("$AS" tldr --role-id "delib-$stance" --state-dir "$TLDR_DIR" --stance-whitelist "$DELIB_WHITELIST")
+  got=$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"])')
+  assert_eq "$got" "$stance" "deliberation: stance=$stance with deliberation whitelist"
+done
+
+# Case 5: persuasion stance with deliberation whitelist -> null (cross-vocab reject)
+setup_tldr_session "delib-cross" "tldr-standard.txt"
+out=$("$AS" tldr --role-id "delib-cross" --state-dir "$TLDR_DIR" --stance-whitelist "$DELIB_WHITELIST")
+got=$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"] is None)')
+assert_eq "$got" "True" "cross-vocab rejection: hold with deliberation whitelist -> null"
+
+# Case 6: deliberation stance with persuasion whitelist -> null
+setup_tldr_session "perm-cross" "tldr-deliberation-prefer.txt"
+out=$("$AS" tldr --role-id "perm-cross" --state-dir "$TLDR_DIR" --stance-whitelist "hold,concede,add")
+got=$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"] is None)')
+assert_eq "$got" "True" "cross-vocab rejection: prefer with persuasion whitelist -> null"
+
+# Case 7: no --stance-whitelist flag -> default persuasion vocab (backward compat)
+setup_tldr_session "no-flag-default" "tldr-standard.txt"
+out=$("$AS" tldr --role-id "no-flag-default" --state-dir "$TLDR_DIR")
+got=$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"])')
+assert_eq "$got" "hold" "no flag -> default whitelist (backward compat)"
+
+# Case 8: --help mentions --stance-whitelist (parser regression guard)
+"$AS" tldr --help 2>&1 | grep -q -- "--stance-whitelist"
+assert_rc $? 0 "tldr --help mentions --stance-whitelist"
+
+echo ""
 echo "================================================"
 echo "Result: $PASS passed, $FAIL failed"
 echo "================================================"
