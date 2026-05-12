@@ -122,8 +122,8 @@ Tokens: ~Xk used / ~52k planned (estimate)
 DEBATE_ID=$(date +%s%N | md5sum | head -c4)
 DEBATE_DIR="/tmp/debate-${DEBATE_ID}"
 SESSIONS_DIR="${DEBATE_DIR}/sessions"
-TLDRS_HISTORY="${DEBATE_DIR}/tldrs-history"  # NEW: per-role accumulated TL;DRs for reconcile
-mkdir -p "$SESSIONS_DIR" "$TLDRS_HISTORY"
+TLDRS_HISTORY="${DEBATE_DIR}/tldrs-history"  # per-role accumulated TL;DRs for reconcile
+mkdir -p "$SESSIONS_DIR" "$TLDRS_HISTORY" "$DEBATE_DIR/roles"
 ```
 
 `SESSIONS_DIR` is the shared state directory passed to every `spawn` / `send` / `output` / `cleanup` call. Cleanup is `rm -rf "$DEBATE_DIR"`.
@@ -277,6 +277,8 @@ When you modify a module: also update its invariants in the manifest if behavior
 
 Debate needs a **persistent multi-turn session per role**, with shared lifetime so cleanup is collective. Use [agent-session](../agent-session/SKILL.md)'s `spawn` verb to create each role's session — debate supplies role identity (Persuasion: defender / role-a / role-b / wildcard; Deliberation: stakeholder roles / synthesizer), model preference (resolved in §2.3), the role's first-turn input (§2.4), and a system prompt that requires debate's preset-specific output schema. Run all spawns in parallel — round-1 prompts are independent, so wall-clock equals the slowest role's latency. Skip `role-b` when §2.3 made it topic-conditional.
 
+**[MUST] Before each spawn, save the assembled per-role identity prompt** (shared context + role template from §2.4) to `$DEBATE_DIR/roles/${r}.md`. This file is the reconcile anchor — if the role's session is lost mid-debate, §Reconcile re-uses it to rebuild context without re-reading the original source files.
+
 **[MUST] Pass `--timeout 900` at spawn time.** agent-session's default ceiling (1800s) is generous, but `spawn` persists `meta.timeout` for the entire session lifetime — if you don't set it explicitly, sends inherit whatever the env was when spawn ran. Empirically, gpt-5.5-class reasoning models on round-3+ resumes can take 200-400s per turn; 900s gives ~3x headroom. If a specific round still trips it, `send --force --timeout 1500` bumps and retries (see §Round N).
 
 ```bash
@@ -366,7 +368,7 @@ dispatched in parallel.
 
 ```bash
 # correct — foreground parallel
-for r in $ACTIVE_ROLES; do
+for r in "${ACTIVE_ROLES[@]}"; do
   agent-session send --role-id "$r" \
     --state-dir "$SESSIONS_DIR" \
     --prompt-file "$DEBATE_DIR/r${N}.md" \
@@ -457,24 +459,33 @@ cat "$DEBATE_DIR/shared-context.md" \
     > "$DEBATE_DIR/recover-${r}.md"
 
 # 3. re-spawn with --initial-round set to this role's expected current round.
-#    This keeps round_count aligned with peer roles still at round N.
+#    This sets round_count = N so the next send is indexed r${N}.
 agent-session spawn \
   --backend "$backend" --model "$model" \
   --role-id "$r" --state-dir "$SESSIONS_DIR" \
   --system-prompt "$SYS" --prompt-file "$DEBATE_DIR/recover-${r}.md" \
   --initial-round "$N" \
   --timeout 1800
+
+# 4. Now send round N's actual discussion prompt.
+#    spawn's first turn (recover-${r}.md) restores context, not round N content.
+#    round_count is now N; this send writes r${N}.txt and advances to N+1.
+agent-session send \
+  --role-id "$r" --state-dir "$SESSIONS_DIR" \
+  --prompt-file "$DEBATE_DIR/r${N}.md" \
+  --timeout 1800
 ```
 
-Then continue round N's send fan-out as normal — this role's spawn (which
-internally runs the first turn) replaces the failed send.
+The recovery adds one extra turn of overhead per affected role. After step 4
+the role is fully aligned: `tldr` reads `r${N}.txt` and `round_count = N+1`,
+matching any peer roles that completed round N directly.
 
 **Why this design**:
 - agent-session stays thin: it doesn't persist the original spawn prompt or
   know how to "replay" — debate owns the round-history bookkeeping
-- `--initial-round` is the only state debate has to thread through;
-  everything else (output extraction, TL;DR fetching) already works
-  unchanged once round_count is aligned
+- `--initial-round` sets round_count so the explicit send lands at the right
+  index; without it the send would be indexed r1 regardless of how many
+  rounds peers have done
 - No keepalive needed: session-lost is detected on next send and recovered
   in one round of overhead (vs. periodic ping wasting tokens forever)
 
