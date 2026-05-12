@@ -74,7 +74,9 @@ modules:
     invariants:
       - { kind: contains, value: "cross-perspective integrator" }
       - { kind: contains, value: "trade-off matrix" }
-      - { kind: forbidden, value: "advocate for any stakeholder" }  # explicit non-advocacy
+      - { kind: contains,  value: "do NOT represent" }              # positively enforce non-advocacy phrasing
+      - { kind: forbidden, value: "I recommend we choose" }         # would appear in drifted advocacy
+      - { kind: forbidden, value: "my preferred option" }           # would appear in drifted advocacy
 
   - id: output-format-persuasion
     path: references/output-format-persuasion.md
@@ -84,7 +86,7 @@ modules:
     invariants:
       - { kind: contains,     value: "## TL;DR" }
       - { kind: contains,     value: "[stance:" }
-      - { kind: contains_any, values: ["hold", "concede", "add"] }
+      - { kind: contains_all, values: ["hold", "concede", "add"] }
       - { kind: contains,     value: "## Argument" }
 
   - id: output-format-deliberation

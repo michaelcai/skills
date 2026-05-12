@@ -15,7 +15,7 @@ Every role's output — first turn and every subsequent round — MUST follow th
 
 - `## TL;DR` and `## Argument` are H2 headings: they delimit the cheap-to-read summary from the full evidence.
 - `[stance: ...]` is a literal bracketed tag: machine-extractable independent of TL;DR text.
-- The three stance values (`hold`, `concede`, `add`) are a closed set: see [`stance-tags.md`](./stance-tags.md) for semantics.
+- The three stance values (`hold`, `concede`, `add`) are a closed set: see [`stance-tags-persuasion.md`](./stance-tags-persuasion.md) for semantics.
 
 ## Drift = silent failure
 
@@ -25,5 +25,5 @@ This is the invariant `tests/manifest-invariants.sh` enforces:
 
 - contains `## TL;DR`
 - contains `[stance:`
-- contains at least one of `hold`, `concede`, `add`
+- contains all of `hold`, `concede`, `add`
 - contains `## Argument`
