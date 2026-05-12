@@ -1,0 +1,15 @@
+## TL;DR
+Plans X and Y have irreducible trade-off between security audit posture and oncall load.
+[stance: accept]
+
+## Argument
+Trade-off matrix:
+
+| Option | security | oncall |
+|--------|----------|--------|
+| Plan X | prefer   | oppose |
+| Plan Y | accept   | prefer |
+
+No dominant option emerges. Plan Y is the safest compromise if leadership accepts the
+audit-granularity trade. Plan X is right if leadership accepts the temporary oncall
+burden during transition.

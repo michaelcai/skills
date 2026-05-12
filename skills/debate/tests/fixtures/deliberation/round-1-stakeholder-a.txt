@@ -1,0 +1,9 @@
+## TL;DR
+From the security team's lens, Plan X preserves our audit posture; Plan Y forces tradeoffs we can't absorb.
+[stance: prefer]
+
+## Argument
+Security team's win-condition: audit trail must remain immutable + queryable by
+incident timeline. Plan X preserves both. Plan Y's batch-commit model loses 15-minute
+granularity, which is below our minimum incident-reconstruction floor.
+Red-line: any plan that loses sub-hour audit granularity.

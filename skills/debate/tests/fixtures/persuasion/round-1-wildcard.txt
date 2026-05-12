@@ -1,0 +1,9 @@
+## TL;DR
+Stepping back: is the original problem statement well-formed?
+[stance: add]
+
+## Argument
+We're solving for token rotation cadence, but the actual incident that triggered this
+work was an operational gap (no on-call rotation). Three layers of auth complexity to
+fix a process gap may be misdiagnosis. What's the cheapest experiment that would
+disprove "this is actually a process problem"?

@@ -1,0 +1,8 @@
+## TL;DR
+Examining from the security angle: there's a token-replay surface unaccounted for.
+[stance: add]
+
+## Argument
+The token rotation window in the proposal does not bound the replay surface — if an
+attacker captures a refresh token they retain access for the full rotation window.
+This is a security regression versus the current model.

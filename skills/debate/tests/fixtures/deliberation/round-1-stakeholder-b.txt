@@ -1,0 +1,9 @@
+## TL;DR
+On-call engineers next 6 months would oppose Plan X — it doubles paging surface during transition.
+[stance: oppose]
+
+## Argument
+On-call window for the migration period (~6 months) gets two new alert sources from
+Plan X: the legacy-write-shadow path and the new dual-write reconciliation. We
+currently page ~2x/week; Plan X likely takes us to ~5x/week for the transition.
+Red-line: anything that takes weekly page count above 4.
