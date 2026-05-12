@@ -16,4 +16,4 @@ Like Role A, your angle is concrete and specific (passed in your first-turn inpu
 
 ## Your output
 
-Follow [`../output-format.md`](../output-format.md) exactly.
+Follow [`../output-format-persuasion.md`](../output-format-persuasion.md) exactly.

@@ -20,4 +20,4 @@ You are not \"Role C.\" You don't have an examination angle. If your reply reads
 
 ## Your output
 
-Follow [`../output-format.md`](../output-format.md) exactly. The TL;DR must answer: what's the divergent take that the focused critics will not produce?
+Follow [`../output-format-persuasion.md`](../output-format-persuasion.md) exactly. The TL;DR must answer: what's the divergent take that the focused critics will not produce?

@@ -46,23 +46,6 @@ modules:
       - { kind: contains,  value: "NOT scoped" }
       - { kind: forbidden, value: "## Your examination angle" }
 
-  - id: output-format
-    path: references/output-format.md
-    loaded_by: role-system-prompt
-    purpose: "Mandatory output schema - TL;DR + stance + Argument"
-    invariants:
-      - { kind: contains,     value: "## TL;DR" }
-      - { kind: contains,     value: "[stance:" }
-      - { kind: contains_any, values: ["hold", "concede", "add"] }
-      - { kind: contains,     value: "## Argument" }
-
-  - id: stance-tags
-    path: references/stance-tags.md
-    loaded_by: role-system-prompt
-    purpose: "Stance tag semantics - closed set hold/concede/add"
-    invariants:
-      - { kind: contains_all, values: ["hold", "concede", "add"] }
-
   - id: parallel-tmux
     path: references/parallel-tmux.md
     loaded_by: moderator-optional
@@ -70,3 +53,83 @@ modules:
     invariants:
       - { kind: contains, value: "Visualization, not parallelism" }
       - { kind: contains, value: "tmux" }
+
+  # Deliberation-preset modules
+  - id: role-stakeholder
+    path: references/roles/stakeholder.md
+    loaded_by: role-session
+    preset: deliberation
+    purpose: "Stakeholder role template — advocates from a specific lens, identity dynamically filled at spawn"
+    invariants:
+      - { kind: contains, value: "speak for a specific stakeholder" }
+      - { kind: contains, value: "win-condition" }
+      - { kind: contains, value: "red-line" }
+      - { kind: forbidden, value: "examination angle" }  # NOT a critic
+
+  - id: role-synthesizer
+    path: references/roles/synthesizer.md
+    loaded_by: role-session
+    preset: deliberation
+    purpose: "Synthesizer role — cross-perspective integrator, maintains trade-off matrix"
+    invariants:
+      - { kind: contains, value: "cross-perspective integrator" }
+      - { kind: contains, value: "trade-off matrix" }
+      - { kind: forbidden, value: "advocate for any stakeholder" }  # explicit non-advocacy
+
+  - id: output-format-persuasion
+    path: references/output-format-persuasion.md
+    loaded_by: role-system-prompt
+    preset: persuasion
+    purpose: "Output format spec, Persuasion preset (hold/concede/add stance)"
+    invariants:
+      - { kind: contains,     value: "## TL;DR" }
+      - { kind: contains,     value: "[stance:" }
+      - { kind: contains_any, values: ["hold", "concede", "add"] }
+      - { kind: contains,     value: "## Argument" }
+
+  - id: output-format-deliberation
+    path: references/output-format-deliberation.md
+    loaded_by: role-system-prompt
+    preset: deliberation
+    purpose: "Output format spec, Deliberation preset (prefer/accept/oppose/abstain stance)"
+    invariants:
+      - { kind: contains,     value: "## TL;DR" }
+      - { kind: contains,     value: "[stance:" }
+      - { kind: contains_all, values: ["prefer", "accept", "oppose", "abstain"] }
+      - { kind: contains,     value: "## Argument" }
+      - { kind: forbidden,    value: "hold/concede/add" }  # cross-vocab leakage guard
+
+  - id: stance-tags-persuasion
+    path: references/stance-tags-persuasion.md
+    loaded_by: role-system-prompt
+    preset: persuasion
+    purpose: "Stance tag semantics (Persuasion): hold/concede/add"
+    invariants:
+      - { kind: contains_all, values: ["hold", "concede", "add"] }
+
+  - id: stance-tags-deliberation
+    path: references/stance-tags-deliberation.md
+    loaded_by: role-system-prompt
+    preset: deliberation
+    purpose: "Stance tag semantics (Deliberation): prefer/accept/oppose/abstain"
+    invariants:
+      - { kind: contains_all, values: ["prefer", "accept", "oppose", "abstain"] }
+
+  # Preset modules
+  - id: preset-persuasion
+    path: references/modes/persuasion.md
+    loaded_by: preset-spec
+    preset: persuasion
+    purpose: "Persuasion preset spec: 4 primitives as frontmatter + descriptive prose"
+    invariants:
+      - { kind: contains_all, values: ["preset: persuasion", "role-topology:", "stance-contract:", "checkpoint-policy:", "output-format:"] }
+      - { kind: contains,     value: "Walton" }  # academic provenance check
+
+  - id: preset-deliberation
+    path: references/modes/deliberation.md
+    loaded_by: preset-spec
+    preset: deliberation
+    purpose: "Deliberation preset spec: 4 primitives as frontmatter + descriptive prose"
+    invariants:
+      - { kind: contains_all, values: ["preset: deliberation", "role-topology:", "stance-contract:", "checkpoint-policy:", "output-format:"] }
+      - { kind: contains,     value: "trade-off" }

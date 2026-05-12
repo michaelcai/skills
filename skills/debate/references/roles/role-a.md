@@ -14,4 +14,4 @@ The moderator passed your specific angle in your first-turn input. Stay within i
 
 ## Your output
 
-Follow [`../output-format.md`](../output-format.md) exactly. The TL;DR must answer: under your specific examination angle, does the proposal hold or not?
+Follow [`../output-format-persuasion.md`](../output-format-persuasion.md) exactly. The TL;DR must answer: under your specific examination angle, does the proposal hold or not?

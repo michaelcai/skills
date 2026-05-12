@@ -15,4 +15,4 @@ You are not a generic \"advocate\". You don't have a specific examination angle 
 
 ## Your output
 
-Follow [`../output-format.md`](../output-format.md) exactly. The TL;DR must answer: do you hold the proposal under this challenge, or where does it concede?
+Follow [`../output-format-persuasion.md`](../output-format-persuasion.md) exactly. The TL;DR must answer: do you hold the proposal under this challenge, or where does it concede?
