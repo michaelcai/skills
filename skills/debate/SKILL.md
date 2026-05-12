@@ -14,8 +14,8 @@ When the user challenges the current agent's proposal/opinion, organize a multi-
 2. The main agent is the **moderator**, never a debater. It orchestrates, judges convergence, summarizes, and hands off to the user.
 3. Roles are generated **dynamically** for each debate. Identity must be specific to the current proposal/challenge.
 4. Sessions **persist across rounds** — each role keeps its own conversation history via [`agent-session`](../agent-session/) (read its SKILL.md for CLI semantics; this skill only references the verbs).
-5. **Every 3 rounds is a checkpoint** — present consensus / divergence / decision points to the user.
-6. **Stance tags** (`hold` / `concede` / `add`) are mandatory in every output — used to detect false consensus.
+5. **Checkpoint trigger is preset-aware.** Persuasion checkpoints every 3 rounds; Deliberation checkpoints when all stakeholders have contributed and the trade-off is ready to inspect.
+6. **Stance tags are mandatory in every output** — Persuasion uses `hold` / `concede` / `add`; Deliberation uses `prefer` / `accept` / `oppose` / `abstain`. They are used to detect false consensus.
 
 > **About model families.** Each driver carries a static `family` hint (claude→anthropic, codex→openai, opencode→openai by default). It's a heuristic for picking the Defender (same family as the main agent) and spreading roles across families. Override per-role via env vars or prefs. opencode is multi-provider; treat its `(openai)` tag as a default, not a fact.
 
@@ -24,6 +24,7 @@ When the user challenges the current agent's proposal/opinion, organize a multi-
 ```
 /debate                                              # auto-analyze current context, infer challenge direction and roles
 /debate "I think this proposal has scaling issues"   # specify the challenge
+/debate --preset deliberation "Which launch plan should we choose?"  # force Deliberation preset
 ```
 
 Interactive only. Not auto-invoked by other skills.
@@ -48,7 +49,7 @@ Begin once confirmed.
 
 ### Step 1.5: Preflight + budget gate
 
-After context confirmation, before any `agent-session spawn`, the moderator runs a short preflight that resolves two independent axes and prints **one combined block** the user signs off on:
+After context confirmation, before any `agent-session spawn`, the moderator runs a short preflight that resolves independent axes and prints **one combined block** the user signs off on:
 
 1. **Language** (for role prose only — section markers stay English):
    ```
@@ -67,7 +68,13 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
    - TTY attached, tmux not installed → `Parallel: background subprocess (tmux not found)`
    - **No TTY** (moderator running headless) → `Parallel: background subprocess (no TTY for tmux panes)` — don't promise split panes you won't deliver.
 
-3. **Budget estimate**:
+3. **Preset detection**:
+   ```
+   --preset flag → lib/detect-preset.sh on challenge text → fallback persuasion
+   ```
+   The auto-detect heuristic matches keywords in the challenge text. If a deliberation indicator is matched, recommend `deliberation`; otherwise default to `persuasion`. The preflight gate always displays which preset is active and why.
+
+4. **Budget estimate**:
    ```
    inter_round   ≈ M_roles × R_planned × 1.7k         (TL;DR piped to disk, moderator doesn't read full Argument)
    checkpoint    ≈ floor(R_planned / 3) × M_roles × 1.5k  (moderator reads full Argument bodies to synthesize)
@@ -81,11 +88,25 @@ Print one combined gate, wait for user:
 ```
 Language: zh (autodetected from challenge text, override with /debate --lang xx)
 Parallel: background subprocess (no TTY for tmux panes)
+Preset: <preset-name> (auto, matched "<keyword>" in challenge / default)
+        Override with --preset <other> to force.
 Debate plan: 4 roles × ~6 rounds ≈ ~52k tokens, ~4 min wall-clock
 Begin? (Y/n)  [or self-critique / cancel]
 ```
 
-The running token counter reappears at the every-3-round checkpoint:
+For **Deliberation** preset, include stakeholder confirmation in the same gate:
+
+```
+Stakeholders (for deliberation):
+  A. <stakeholder slug + 1-line description>
+  B. <stakeholder slug + 1-line description>
+  C. <stakeholder slug + 1-line description>
+Edit list? (Y/n)  Default: use as-is
+```
+
+The moderator extracts 2-4 stakeholders from the challenge text. If the user replies `edit`, they provide the replacement list before spawn.
+
+The running token counter reappears at the checkpoint trigger:
 
 ```
 Tokens: ~Xk used / ~52k planned (estimate)
@@ -162,6 +183,10 @@ The pool must have ≥1 backend. Single-family pools surface the §2.2 warning.
 
 #### 2.3 Per-role assignment algorithm
 
+The algorithm depends on the active preset. Both presets share the priority chain (inline override > env var > pool entry > pool default), but the role set differs.
+
+##### 2.3-a Persuasion preset (existing)
+
 Each role resolves to one `(backend, model)` via priority chain (high → low):
 
 ```
@@ -185,6 +210,22 @@ P3. Main-agent assignment from the prefs pool:
 **Model resolution** (after agent fixed): env var → `prefs[*].model` → `null` (let the backend pick its default).
 
 Env vars: `DEBATE_<ROLE>_BACKEND` / `DEBATE_<ROLE>_MODEL`, where `<ROLE>` ∈ `DEFENDER` / `ROLE_A` / `ROLE_B` / `WILDCARD`.
+
+##### 2.3-b Deliberation preset
+
+Roles are N stakeholders (2-4, from preflight §1.5 stakeholder list) + 1 synthesizer.
+
+```
+For each stakeholder S in confirmed-list:
+  S → next-pool-entry, rotating through pool to maximize family diversity
+Synthesizer → cross-family from majority of stakeholders
+              (the synthesizer must NOT share the family of >50% of stakeholders;
+               diversity is its structural function)
+```
+
+Model resolution follows the same priority chain as Persuasion (env → pool → default).
+
+Stakeholder identity at spawn = `<slug>: <1-line description>` from preflight, prepended to the role's first-turn prompt.
 
 #### 2.3.1 Print decision and confirm
 
@@ -213,7 +254,16 @@ A debate has 3 or 4 roles. The main agent constructs identities — keep them sp
 
 #### 2.4 Prompt files (uses references/)
 
-For each role, debate's first-turn input is the concatenation of (a) `$DEBATE_DIR/shared-context.md` (the original proposal + challenge + project context the moderator writes) and (b) the role's identity module from `references/roles/<role-id>.md`. The role's system prompt at spawn time wraps `references/output-format.md` so every reply matches the output schema.
+For each role's first-turn input, concatenate:
+- The shared context (§2.1)
+- The role's identity template from `references/roles/<role-name>.md`
+- The preset's output-format spec from `references/output-format-<preset>.md`
+
+For Persuasion: `output-format-persuasion.md`. For Deliberation: `output-format-deliberation.md`.
+
+The system prompt at spawn for each role MUST include the preset's stance whitelist, which the role uses internally to constrain its `[stance: ...]` line.
+
+The shared context is `$DEBATE_DIR/shared-context.md` (the original proposal + challenge + project context the moderator writes). Role identity modules live under `references/roles/`; Persuasion uses `defender.md`, `role-a.md`, `role-b.md`, and `wildcard.md`; Deliberation uses `stakeholder.md` for each confirmed stakeholder and `synthesizer.md` for the integrator.
 
 The complete registry of prompt modules — paths, load points, and per-module invariants — lives in [`references/_manifest.yaml`](./references/_manifest.yaml). Smoke tests in `tests/manifest-invariants.sh` verify the registry.
 
@@ -222,9 +272,23 @@ When you modify a module: also update its invariants in the manifest if behavior
 
 #### 2.5 Spawn roles
 
-Debate needs a **persistent multi-turn session per role**, with shared lifetime so cleanup is collective. Use [agent-session](../agent-session/SKILL.md)'s `spawn` verb to create each role's session — debate supplies role identity (defender / role-a / role-b / wildcard), model preference (resolved in §2.3), the role's first-turn input (§2.4), and a system prompt that requires debate's output schema (§2.4 references `references/output-format.md`). Run all spawns in parallel — round-1 prompts are independent, so wall-clock equals the slowest role's latency. Skip `role-b` when §2.3 made it topic-conditional.
+Debate needs a **persistent multi-turn session per role**, with shared lifetime so cleanup is collective. Use [agent-session](../agent-session/SKILL.md)'s `spawn` verb to create each role's session — debate supplies role identity (Persuasion: defender / role-a / role-b / wildcard; Deliberation: stakeholder roles / synthesizer), model preference (resolved in §2.3), the role's first-turn input (§2.4), and a system prompt that requires debate's preset-specific output schema. Run all spawns in parallel — round-1 prompts are independent, so wall-clock equals the slowest role's latency. Skip `role-b` when §2.3 made it topic-conditional.
 
 **[MUST] Pass `--timeout 900` at spawn time.** agent-session's default ceiling (1800s) is generous, but `spawn` persists `meta.timeout` for the entire session lifetime — if you don't set it explicitly, sends inherit whatever the env was when spawn ran. Empirically, gpt-5.5-class reasoning models on round-3+ resumes can take 200-400s per turn; 900s gives ~3x headroom. If a specific round still trips it, `send --force --timeout 1500` bumps and retries (see §Round N).
+
+```bash
+# Derive whitelist from preset
+case "$PRESET" in
+  persuasion)   STANCE_WHITELIST="hold,concede,add" ;;
+  deliberation) STANCE_WHITELIST="prefer,accept,oppose,abstain" ;;
+esac
+
+# When extracting TL;DRs after each round, pass the whitelist:
+# agent-session tldr --role-id "$r" --state-dir "$SESSIONS_DIR" \
+#   --stance-whitelist "$STANCE_WHITELIST"
+```
+
+The `agent-session spawn` and `send` calls themselves don't change — the stance whitelist only affects post-hoc tldr extraction.
 
 After this step, each role's first-turn reply is observable via agent-session's `output` and `tldr` verbs; the role's full conversation history is owned by agent-session and never re-supplied by debate.
 
@@ -247,14 +311,23 @@ Build an incremental prompt: only other roles' previous-round TL;DRs + this roun
 For each active role, retrieve the latest-round TL;DR + stance via agent-session's `tldr` verb (returns JSON `{role_id, round_count, tldr_text, stance}`). Cache `tldr_text` to `$DEBATE_DIR/tldrs/<role-id>.md` and `stance` to `$DEBATE_DIR/stances/<role-id>.txt` so the next-round assembly and the false-consensus guard can read them without invoking the verb again. **The moderator never reads these JSON values into its own assistant message** — the verb output goes through `jq` straight to disk:
 
 ```bash
+case "$PRESET" in
+  persuasion)   STANCE_WHITELIST="hold,concede,add" ;;
+  deliberation) STANCE_WHITELIST="prefer,accept,oppose,abstain" ;;
+esac
+
 mkdir -p "$DEBATE_DIR/tldrs" "$DEBATE_DIR/stances"
-for r in defender role-a role-b wildcard; do
+for r in "${ACTIVE_ROLES[@]}"; do
   agent-session describe --role-id "$r" --state-dir "$SESSIONS_DIR" >/dev/null 2>&1 || continue
-  json=$(agent-session tldr --role-id "$r" --state-dir "$SESSIONS_DIR")
+  json=$(agent-session tldr \
+    --role-id "$r" --state-dir "$SESSIONS_DIR" \
+    --stance-whitelist "$STANCE_WHITELIST")
   echo "$json" | jq -r '.tldr_text // ""' > "$DEBATE_DIR/tldrs/$r.md"
   echo "$json" | jq -r '.stance    // "null"' > "$DEBATE_DIR/stances/$r.txt"
 done
 ```
+
+`ACTIVE_ROLES` is the per-preset role list set up at spawn, e.g. `(defender role-a role-b wildcard)` for Persuasion or `(stakeholder-A stakeholder-B stakeholder-C synthesizer)` for Deliberation.
 
 The output extraction format (i.e. how `## TL;DR` and `[stance: ...]` get parsed) is owned by agent-session — debate only consumes the structured fields. A role with `stance: null` cached here is the canonical signal handled in §False-consensus guard.
 
@@ -272,7 +345,7 @@ Pass the SAME `rN.md` to every role via agent-session's `send` verb, dispatched 
 
 ```bash
 pids=()
-for r in defender role-a role-b wildcard; do
+for r in "${ACTIVE_ROLES[@]}"; do
   agent-session send --role-id "$r" \
     --prompt-file "$DEBATE_DIR/rN.md" \
     --state-dir "$SESSIONS_DIR" &
@@ -286,7 +359,7 @@ for entry in "${pids[@]}"; do
 done
 
 # Belt + suspenders: even a 0-exit send is suspect if output is empty or missing the format marker.
-for r in defender role-a role-b wildcard; do
+for r in "${ACTIVE_ROLES[@]}"; do
   out=$(agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" 2>/dev/null)
   echo "$out" | grep -q '^## TL;DR' || failed+=("$r:no-tldr")
 done
@@ -333,13 +406,17 @@ The main agent has a context window. Each round's full Argument bodies × N roun
 
 **(a) Inter-round TL;DRs never enter the moderator's message.** The After-round step calls agent-session's `tldr` verb and pipes the JSON through `jq` straight to `tldrs/<role>.md` and `stances/<role>.txt`; the Pre-round step `cat`s `tldrs/*.md` into `rN.md`. The moderator's only inter-round contribution to its own context is the 4-line focus block.
 
-**(b) Read TL;DRs only at the every-3-round checkpoint.** When you reach a checkpoint, *then* the moderator may `cat $DEBATE_DIR/tldrs/*.md` once to synthesize the consensus/divergence block. Read the full Argument only when the user asks or when the stance distribution warrants verification.
+**(b) Read TL;DRs only at the checkpoint trigger.** When you reach a checkpoint, *then* the moderator may `cat $DEBATE_DIR/tldrs/*.md` once to synthesize the preset-specific checkpoint block. Read the full Argument only when the user asks or when the stance distribution warrants verification.
 
 **(c) Never re-quote role outputs into the assistant message.** When a tool result surfaced a 200-line role output, do NOT re-include it verbatim "to show the user what each said" — the user can `cat` the file themselves. Each role's session already holds its full history (agent-session owns that) — the moderator never needs to repeat anything.
 
 #### [MUST] False-consensus guard
 
-After the After-round step has cached each role's stance, inspect the distribution. **Roles with `stance: null` are a separate signal** — they indicate output-format drift (the role's reply did not match `references/output-format.md`), not a stance position. Investigate before trusting the round's data.
+After the After-round step has cached each role's stance, inspect the distribution. **Roles with `stance: null` are a separate signal** — they indicate output-format drift (the role's reply did not match `references/output-format-<preset>.md`), not a stance position. Investigate before trusting the round's data.
+
+##### Distribution interpretation by preset
+
+For **persuasion**:
 
 | Distribution | Convergence | Action |
 |---|---|---|
@@ -348,6 +425,16 @@ After the After-round step has cached each role's stance, inspect the distributi
 | All `add` | — | **Parallel without dialogue — beware false consensus**; read full arguments |
 | Mixed | Medium | Decide via TL;DR content |
 | **≥1 `null` stance** | **Format drift** | **Apply the format-correction escalation below before deciding to re-spawn or read past the round.** |
+
+For **deliberation**:
+
+| Distribution | Convergence | Action |
+|---|---|---|
+| All `prefer` or `accept`, none `oppose` | Trade-off resolved | Can checkpoint early; produce trade-off matrix conclusion. |
+| Any `oppose` | Irreducible conflict | Continue to surface trade-off; user must decide. |
+| Majority `abstain` | Stakeholder list wrong | Re-extract stakeholders; restart preflight. |
+| Mixed `prefer` and `oppose` | Core tension | Continue rounds; test if positions are flexible under refinement. |
+| ≥1 `null` stance | Format drift | Apply Format-correction escalation (see §False-consensus guard, Persuasion section). Same procedure regardless of preset. |
 
 Text similarity is unreliable. Same TL;DR + different stance tags = strongest false-consensus warning. A `null` stance amid otherwise-valid stances does **not** count as "Mostly X" — it must be resolved first.
 
@@ -363,7 +450,7 @@ Re-spawning is expensive (loses the role's full conversation history) and readin
 
      ## TL;DR
      <2-3 sentences>
-     [stance: hold|concede|add]   ← pick ONE from the closed set, no compound stances
+     [stance: <one value from the active preset whitelist>]   ← pick ONE from the closed set, no compound stances
 
      ## Argument
      <body>
@@ -377,16 +464,26 @@ Re-spawning is expensive (loses the role's full conversation history) and readin
      --state-dir "$SESSIONS_DIR"
    ```
 
-2. Re-run the `tldr` extraction for that role. If stance is now in `{hold, concede, add}`, the corrected reply **replaces** the prior round's cached TL;DR — continue with the round's stance distribution as if nothing went wrong.
+2. Re-run the `tldr` extraction for that role with the active preset's `--stance-whitelist`. If stance is now in the active whitelist, the corrected reply **replaces** the prior round's cached TL;DR — continue with the round's stance distribution as if nothing went wrong.
 
 3. If stance is still `null` after one correction attempt, treat the distribution as unresolved and choose:
    - **Re-spawn** the role (last resort — loses prior context) — useful if the role's reasoning is also drifting.
-   - **Edit `references/output-format.md`** if the format itself is the root cause (run `tests/manifest-invariants.sh` after).
+   - **Edit `references/output-format-<preset>.md`** if the format itself is the root cause (run `tests/manifest-invariants.sh` after).
    - **Continue with the role excluded from this round's distribution** — note it explicitly in the checkpoint Divergence section ("Role X had unresolved format drift in round N; their stance is unknown").
 
 [MUST] If you take option (a) or (c), say so in your reply to the user — silent skill deviation is worse than the format drift itself.
 
-#### Every-3-round checkpoint
+#### Checkpoint trigger (preset-aware)
+
+For **persuasion**: every 3 rounds (unchanged).
+
+For **deliberation**: all stakeholders have contributed ≥1 round AND (round_count ≥ 3 OR all stances ∈ {prefer, accept}).
+
+The checkpoint display also differs:
+- Persuasion: Consensus / Divergence / Moderator judgment / You decide (unchanged).
+- Deliberation: Trade-off matrix (option × stakeholder cells) / Synthesizer recommendation / You decide.
+
+For **persuasion**:
 
 [MUST] Pause and present:
 
@@ -405,6 +502,24 @@ Re-spawning is expensive (loses the role's full conversation history) and readin
 
 ### You decide
 - {specific decision points}
+```
+
+For **deliberation**:
+
+```markdown
+## Discussion progress @ Round N checkpoint
+(Stakeholder A @ R2, Stakeholder B @ R3, Synthesizer @ R3)  // ragged matrix per Partial-success policy
+
+### Trade-off matrix
+| Option | <stakeholder-A> | <stakeholder-B> | ... |
+|--------|-----------------|-----------------|-----|
+| Plan X | prefer          | oppose          | ... |
+
+### Synthesizer recommendation
+(content)
+
+### You decide
+- {decision points}
 ```
 
 User responses: "continue" → 3 more rounds; "switch direction" → adjust focus; "enough" → Step 4.
@@ -430,6 +545,8 @@ This means the moderator's context grows by one ~15-line summary per checkpoint,
 
 ### Step 4: Conclude
 
+For **persuasion**:
+
 ```markdown
 ## Conclusion
 
@@ -447,6 +564,30 @@ This means the moderator's context grows by one ~15-line summary per checkpoint,
 
 ### Unresolved divergence (if any)
 - {...}
+```
+
+For **deliberation**:
+
+```markdown
+## Conclusion
+
+### Original challenge
+{brief}
+
+### Stakeholders (confirmed)
+{list}
+
+### Trade-off matrix
+{full table}
+
+### Dominant option (if any)
+{option that's prefer/accept by all, none oppose; or "no dominant option"}
+
+### Irreducible trade-offs
+{what needs explicit user decision because no dominant option}
+
+### Decision recommendation
+{synthesizer's one-line take}
 ```
 
 ### Step 5: Cleanup
