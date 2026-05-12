@@ -65,3 +65,80 @@ else:
     print(f"FAILED: {fail} invariant violations")
     sys.exit(1)
 PY
+
+MODULE_RC=$?
+if [ "$MODULE_RC" -ne 0 ]; then
+  exit "$MODULE_RC"
+fi
+
+# ============================================================
+# Preset coherence check
+# ============================================================
+# For every module declared with preset: X, verify:
+# 1. A preset-spec module exists for X (loaded_by: preset-spec)
+# 2. The preset spec file declares all 4 primitives in frontmatter:
+#    role-topology, stance-contract, checkpoint-policy, output-format
+echo ""
+echo "=== Preset coherence check ==="
+
+python3 - "$MANIFEST" "$SKILL_DIR" <<'PY2'
+import sys, yaml, pathlib
+
+manifest_path, skill_dir = sys.argv[1], pathlib.Path(sys.argv[2])
+manifest = yaml.safe_load(open(manifest_path))
+modules = manifest["modules"]
+errors = []
+
+# Group modules by preset (skip modules without preset field)
+by_preset = {}
+for m in modules:
+    p = m.get("preset")
+    if p:
+        by_preset.setdefault(p, []).append(m)
+
+required_primitives = {"role-topology", "stance-contract", "checkpoint-policy", "output-format"}
+
+for preset_name, mods in by_preset.items():
+    # Find the preset-spec module for this preset
+    spec_modules = [m for m in mods if m.get("loaded_by") == "preset-spec"]
+    if not spec_modules:
+        errors.append(f"preset '{preset_name}': no preset-spec module declared")
+        continue
+    if len(spec_modules) > 1:
+        errors.append(f"preset '{preset_name}': multiple preset-spec modules declared (expected exactly 1)")
+        continue
+
+    spec = spec_modules[0]
+    spec_path = skill_dir / spec["path"]
+    if not spec_path.exists():
+        errors.append(f"preset '{preset_name}': spec file {spec_path} not found")
+        continue
+
+    content = spec_path.read_text()
+    frontmatter = content
+    if content.startswith("---\n"):
+        parts = content.split("---\n", 2)
+        if len(parts) >= 3:
+            frontmatter = parts[1]
+
+    # Check each required primitive appears as `<name>:` in the frontmatter region.
+    for prim in required_primitives:
+        marker = f"{prim}:"
+        if marker not in frontmatter:
+            errors.append(f"preset '{preset_name}' ({spec_path}): missing primitive declaration '{marker}'")
+
+if errors:
+    print("FAIL: preset coherence check failed:", file=sys.stderr)
+    for e in errors:
+        print(f"  - {e}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"OK: {len(by_preset)} presets coherent, all 4 primitives declared in each")
+PY2
+
+PRESET_RC=$?
+if [ "$PRESET_RC" -ne 0 ]; then
+  echo ""
+  echo "FAIL: preset coherence check returned $PRESET_RC"
+  exit 1
+fi
