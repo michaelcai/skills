@@ -396,6 +396,22 @@ assert_eq "$got" "hold" "no flag -> default whitelist (backward compat)"
 "$AS" tldr --help 2>&1 | grep -q -- "--stance-whitelist"
 assert_rc $? 0 "tldr --help mentions --stance-whitelist"
 
+# Case 9: whitespace-tolerant CSV
+out=$("$AS" tldr --role-id "delib-prefer" --state-dir "$TLDR_DIR" --stance-whitelist " prefer , accept , oppose , abstain ")
+got=$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"])')
+assert_eq "$got" "prefer" "whitelist tolerates surrounding whitespace per value"
+
+# Case 10: doubled commas treated as empty entries (skipped)
+out=$("$AS" tldr --role-id "delib-prefer" --state-dir "$TLDR_DIR" --stance-whitelist "prefer,,accept")
+got=$(echo "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["stance"])')
+assert_eq "$got" "prefer" "doubled commas don't break parsing"
+
+# Case 11: empty --stance-whitelist exits 2 with error
+out=$("$AS" tldr --role-id "delib-prefer" --state-dir "$TLDR_DIR" --stance-whitelist "" 2>&1 >/dev/null)
+rc=$?
+assert_rc $rc 2 "empty --stance-whitelist exits 2"
+assert_contains "$out" "empty stance whitelist" "empty whitelist stderr says so"
+
 echo ""
 echo "================================================"
 echo "Result: $PASS passed, $FAIL failed"

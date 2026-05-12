@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 
-DEFAULT_STANCE_WHITELIST = ("hold", "concede", "add")
+DEFAULT_STANCE_WHITELIST = frozenset({"hold", "concede", "add"})
 
 
 # ============================================================
@@ -89,7 +89,7 @@ def lock(role_id: str, state_dir: Optional[str]):
         lf.unlink(missing_ok=True)
 
 
-def _extract_tldr_and_stance(text: str, whitelist: tuple[str, ...] = DEFAULT_STANCE_WHITELIST) -> dict:
+def _extract_tldr_and_stance(text: str, whitelist: frozenset[str] = DEFAULT_STANCE_WHITELIST) -> dict:
     """Extract debate's TL;DR section and stance tag from a role's latest output.
 
     Returns {"tldr_text": str | None, "stance": str | None}.
@@ -97,7 +97,7 @@ def _extract_tldr_and_stance(text: str, whitelist: tuple[str, ...] = DEFAULT_STA
     and the next '## ' heading or end-of-text, with any trailing whitelisted stance
     tag stripped, then trimmed.
     `stance` is the `[stance: <word>]` tag value if present anywhere in the text
-    with a whitelisted value; None otherwise.
+    with a caller-supplied whitelisted value; None otherwise.
     Note: invalid stance values (e.g. `[stance: maybe]`) stay in `tldr_text` —
     the helper does not try to clean malformed output.
     """
@@ -1083,9 +1083,13 @@ def cmd_tldr(args) -> int:
     if not text.strip():
         print(json.dumps({"error": "empty output", "role_id": args.role_id, "round": n}), file=sys.stderr)
         return 2
-    whitelist = DEFAULT_STANCE_WHITELIST
-    if args.stance_whitelist:
-        whitelist = tuple(s.strip() for s in args.stance_whitelist.split(",") if s.strip())
+    if args.stance_whitelist is not None:
+        whitelist = frozenset(s.strip() for s in args.stance_whitelist.split(",") if s.strip())
+        if not whitelist:
+            print(json.dumps({"error": "empty stance whitelist"}), file=sys.stderr)
+            return 2
+    else:
+        whitelist = DEFAULT_STANCE_WHITELIST
     extracted = _extract_tldr_and_stance(text, whitelist=whitelist)
     print(json.dumps({
         "role_id": args.role_id,
