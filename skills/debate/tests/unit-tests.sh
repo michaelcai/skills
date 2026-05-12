@@ -283,6 +283,73 @@ EOF
 }
 
 # -------------------------------------------------------------------
+# Preset detection heuristic
+# -------------------------------------------------------------------
+
+detect_preset() {
+  "$SD/../lib/detect-preset.sh" "$1" | cut -d: -f1
+}
+
+[ -x "$SD/../lib/detect-preset.sh" ] || { echo "FAIL: detect-preset.sh not executable"; exit 1; }
+
+assert_detect_preset() {
+  local input=$1 expected=$2 got
+  got=$(detect_preset "$input")
+  [ "$got" = "$expected" ] || {
+    echo "  detect-preset: '$input' expected $expected, got $got"
+    return 1
+  }
+}
+
+test_detect_preset_deliberation_gai_bugai() {
+  assert_detect_preset "我们该不该 X" "deliberation"
+}
+
+test_detect_preset_deliberation_yingbuyinggai() {
+  assert_detect_preset "应不应该重构" "deliberation"
+}
+
+test_detect_preset_deliberation_zuobuzuo() {
+  assert_detect_preset "做不做这个" "deliberation"
+}
+
+test_detect_preset_deliberation_huasuan() {
+  assert_detect_preset "划算吗" "deliberation"
+}
+
+test_detect_preset_deliberation_zhide() {
+  assert_detect_preset "值得吗" "deliberation"
+}
+
+test_detect_preset_deliberation_trade_off() {
+  assert_detect_preset "trade-off here" "deliberation"
+}
+
+test_detect_preset_deliberation_should_we() {
+  assert_detect_preset "should we ship" "deliberation"
+}
+
+test_detect_preset_deliberation_xuan_haishi() {
+  assert_detect_preset "选 X 还是 Y" "deliberation"
+}
+
+test_detect_preset_persuasion_default_correct() {
+  assert_detect_preset "X is correct" "persuasion"
+}
+
+test_detect_preset_persuasion_default_chinese_problem() {
+  assert_detect_preset "X 设计有问题吗" "persuasion"
+}
+
+test_detect_preset_persuasion_default_better_than() {
+  assert_detect_preset "is approach Y better than Z" "persuasion"
+}
+
+test_detect_preset_persuasion_default_hold_up() {
+  assert_detect_preset "这个 proposal hold up 吗" "persuasion"
+}
+
+# -------------------------------------------------------------------
 # MAIN
 # -------------------------------------------------------------------
 
