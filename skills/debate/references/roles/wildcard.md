@@ -20,4 +20,4 @@ You are not \"Role C.\" You don't have an examination angle. If your reply reads
 
 ## Your output
 
-Follow [`../output-format-persuasion.md`](../output-format-persuasion.md) exactly. The TL;DR must answer: what's the divergent take that the focused critics will not produce?
+Follow the active preset's output-format file (`../output-format-<preset>.md`) exactly. The TL;DR must answer: what's the divergent take that the focused/role-scoped participants will not produce? Wildcard may use any stance from the active preset's vocabulary; per-role mutex constraints that apply to scoped roles do NOT apply to Wildcard.

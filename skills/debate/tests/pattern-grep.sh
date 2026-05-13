@@ -54,6 +54,15 @@ assert_match "initial-round" "§Reconcile must reference --initial-round"
 assert_match "send fan-out 嵌套" "§Red Flags must list 'send fan-out 嵌套'"
 assert_match "ScheduleWakeup 等" "§Red Flags must list 'ScheduleWakeup 等 ...'"
 
+# Inquiry preset assertions (Inquiry SKILL.md sections)
+assert_match "##### 2.3-c Inquiry preset" "§2.3-c Inquiry preset assignment section must exist"
+assert_match "inquiry\\)      STANCE_WHITELIST=\"supports,refutes,lateral,inconclusive\"" \
+    "§2.5 case must set inquiry STANCE_WHITELIST"
+assert_match "ACTIVE_ROLES=\\(verifier falsifier triangulator wildcard\\)" \
+    "§2.5 case must set inquiry ACTIVE_ROLES"
+assert_match "For \\*\\*inquiry\\*\\*:" "Inquiry checkpoint trigger / distribution / conclude blocks must reference preset by name"
+assert_match "output-format-inquiry.md" "§2.4 must reference output-format-inquiry.md"
+
 echo
 if [[ $fail -gt 0 ]]; then
   echo "FAILED: $fail check(s)"

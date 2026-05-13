@@ -42,5 +42,30 @@ for kw in "${deliberation_keywords[@]}"; do
   fi
 done
 
+# Inquiry indicators: hypothesis verification phrasing.
+declare -a inquiry_keywords=(
+  # Chinese
+  "真的.*吗"
+  "对吗"
+  "是不是"
+  "验证"
+  "假设.*对"
+  "假设.*真"
+  "是否成立"
+  # English
+  " is (this|that|it|the) .* true"
+  " does .* hold"
+  " verify (the |this |if |whether )"
+  " hypothesis "
+  " is (this|that|it|the) .* actually "
+)
+
+for kw in "${inquiry_keywords[@]}"; do
+  if echo " $challenge " | grep -qiE -- "$kw"; then
+    echo "inquiry:${kw}"
+    exit 0
+  fi
+done
+
 echo "persuasion:default"
 exit 0

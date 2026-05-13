@@ -1,0 +1,1 @@
+Is the team's new CRDT implementation actually safe under network partition with concurrent writes from 3 replicas?

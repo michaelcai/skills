@@ -72,7 +72,7 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
    ```
    --preset flag → lib/detect-preset.sh on challenge text → fallback persuasion
    ```
-   The auto-detect heuristic matches keywords in the challenge text. If a deliberation indicator is matched, recommend `deliberation`; otherwise default to `persuasion`. The preflight gate always displays which preset is active and why.
+   The auto-detect heuristic matches keywords in the challenge text. If a deliberation indicator matches, recommend `deliberation`; if an inquiry indicator matches, recommend `inquiry`; otherwise default to `persuasion`. The preflight gate always displays which preset is active and why.
 
 4. **Budget estimate**:
    ```
@@ -230,6 +230,22 @@ Model resolution follows the same priority chain as Persuasion (env → pool →
 
 Stakeholder identity at spawn = `<slug>: <1-line description>` from preflight, prepended to the role's first-turn prompt.
 
+##### 2.3-c Inquiry preset
+
+Roles are 4 fixed investigative roles: verifier, falsifier, triangulator, wildcard. No "defender" — Inquiry has no proposal to defend, only a hypothesis to investigate from three complementary angles plus a divergent angle.
+
+```
+Verifier     → pool entry whose family matches the main agent's family (anchor).
+               If none match, first entry.
+Falsifier    → cross-family entry (different epistemics catch different counter-evidence).
+Triangulator → next pool entry, prefer cross-family from Verifier.
+Wildcard     → cross-family for perspective drift; fall back to any.
+```
+
+Model resolution follows the same priority chain (env → pool → default).
+
+Inquiry roles are fixed (4 total). The hypothesis itself, extracted from challenge text in §1.5, is prepended to every role's first-turn prompt as `Hypothesis under examination: <text>`.
+
 #### 2.3.1 Print decision and confirm
 
 ```
@@ -262,7 +278,7 @@ For each role's first-turn input, concatenate:
 - The role's identity template from `references/roles/<role-name>.md`
 - The preset's output-format spec from `references/output-format-<preset>.md`
 
-For Persuasion: `output-format-persuasion.md`. For Deliberation: `output-format-deliberation.md`.
+For Persuasion: `output-format-persuasion.md`. For Deliberation: `output-format-deliberation.md`. For Inquiry: `output-format-inquiry.md`.
 
 The system prompt at spawn for each role MUST include the preset's stance whitelist, which the role uses internally to constrain its `[stance: ...]` line.
 
@@ -286,6 +302,7 @@ Debate needs a **persistent multi-turn session per role**, with shared lifetime 
 case "$PRESET" in
   persuasion)   STANCE_WHITELIST="hold,concede,add" ;;
   deliberation) STANCE_WHITELIST="prefer,accept,oppose,abstain" ;;
+  inquiry)      STANCE_WHITELIST="supports,refutes,lateral,inconclusive" ;;
 esac
 
 # Used in Round N send (parallel pids[]), output verification, and After-round tldr extraction loops
@@ -298,6 +315,10 @@ case "$PRESET" in
   deliberation)
     ACTIVE_ROLES=("${STAKEHOLDER_SLUGS[@]}" synthesizer)
     # STAKEHOLDER_SLUGS is the confirmed stakeholder list from preflight §1.5
+    ;;
+  inquiry)
+    ACTIVE_ROLES=(verifier falsifier triangulator wildcard)
+    # All 4 fixed; no conditional roles.
     ;;
 esac
 
@@ -332,6 +353,7 @@ For each active role, retrieve the latest-round TL;DR + stance via agent-session
 case "$PRESET" in
   persuasion)   STANCE_WHITELIST="hold,concede,add" ;;
   deliberation) STANCE_WHITELIST="prefer,accept,oppose,abstain" ;;
+  inquiry)      STANCE_WHITELIST="supports,refutes,lateral,inconclusive" ;;
 esac
 
 mkdir -p "$DEBATE_DIR/tldrs" "$DEBATE_DIR/stances"
@@ -541,6 +563,17 @@ For **deliberation**:
 | Mixed `prefer` and `oppose` | Core tension | Continue rounds; test if positions are flexible under refinement. |
 | ≥1 `null` stance | Format drift | Apply Format-correction escalation (see §False-consensus guard, Persuasion section). Same procedure regardless of preset. |
 
+For **inquiry**:
+
+| Distribution | Convergence | Action |
+|---|---|---|
+| Verifier `supports` + others `lateral`/`inconclusive`, no `refutes` | Hypothesis tentatively supported | Checkpoint with Evidence Ledger; flag if `source-kind` is dominated by `analogy`/`theoretical` (weak signal) |
+| Falsifier `refutes` (especially `source-kind: counter-example`) | Hypothesis falsified | Present Falsifier's counter-evidence prominently in checkpoint |
+| Verifier `supports` AND Falsifier `refutes` | Irreducible dispute | Surface both; do NOT synthesize a verdict — user decides |
+| All `inconclusive` | Insufficient evidence | Suggest gathering more data; do not advance to conclusion |
+| ≥1 stance violates per-role mutex (e.g., Verifier outputs `refutes`) | Format drift via mutex violation | Apply format-correction; if Verifier's evidence is genuinely counter, that signal belongs to Falsifier — moderator may relay |
+| stance/source-kind incoherent (e.g., `supports` + `counter-example`) | Heuristic warning | Read full Argument to verify; do not block round |
+
 Text similarity is unreliable. Same TL;DR + different stance tags = strongest false-consensus warning. A `null` stance amid otherwise-valid stances does **not** count as "Mostly X" — it must be resolved first.
 
 ##### Format-correction escalation (for `null` stance)
@@ -583,6 +616,8 @@ Re-spawning is expensive (loses the role's full conversation history) and readin
 For **persuasion**: every 3 rounds (unchanged).
 
 For **deliberation**: all stakeholders have contributed ≥1 round AND (round_count ≥ 3 OR all stances ∈ {prefer, accept}).
+
+For **inquiry**: every 3 rounds (same as Persuasion).
 
 **Example**: 3 stakeholders, round 2, stances `{prefer, accept, prefer}` → fires (all contributed AND all-prefer-accept; trade-off resolved). Same setup at round 2 with stances `{prefer, oppose, accept}` → does NOT fire (need round ≥ 3 because the `oppose` indicates unresolved tension worth more rounds).
 
@@ -627,6 +662,30 @@ For **deliberation**:
 
 ### You decide
 - {decision points}
+```
+
+For **inquiry**:
+
+```markdown
+## Investigation progress @ Round N checkpoint
+(Verifier @ R3, Falsifier @ R2, Triangulator @ R3, Wildcard @ R3)
+
+### Evidence Ledger
+| Claim | source-kind | Cited by | Stance |
+|-------|-------------|----------|--------|
+| (auto-extracted from each role's TL;DR + Argument first paragraph) |
+
+### Convergence reading
+- Verifier signal strength: <high/medium/low/null>
+- Falsifier signal strength: <high/medium/low/null>
+- Triangulator orthogonal flags: <list>
+
+### Missing evidence
+- (gaps the moderator notices: V/F/T didn't reach this angle yet)
+
+### You decide
+- Hypothesis verdict: {tentatively supported / falsified / disputed / insufficient}
+- Next: {more rounds along axis X / sufficient to decide}
 ```
 
 User responses: "continue" → 3 more rounds; "switch direction" → adjust focus; "enough" → Step 4.
@@ -695,6 +754,33 @@ For **deliberation**:
 
 ### Decision recommendation
 {synthesizer's one-line take}
+```
+
+For **inquiry**:
+
+```markdown
+## Conclusion
+
+### Hypothesis examined
+{verbatim}
+
+### Verdict
+{tentatively supported / falsified / disputed / insufficient evidence}
+
+### Strongest supporting evidence
+- {from Verifier: claim + source-kind}
+
+### Strongest counter-evidence
+- {from Falsifier: claim + source-kind: counter-example if available}
+
+### Orthogonal considerations
+- {from Triangulator: what changes how the hypothesis should be evaluated}
+
+### Wildcard's divergent angle
+- {what fell outside V/F/T scope}
+
+### Open questions / Missing evidence
+- {explicit gaps; what would change the verdict}
 ```
 
 ### Step 5: Cleanup

@@ -169,3 +169,57 @@ modules:
           - "session-not-found"
           - "--initial-round"
         # Reconcile section must reference the agent-session CLI surface area.
+
+  # Inquiry preset modules
+  - id: role-verifier
+    path: references/roles/verifier.md
+    loaded_by: role-session
+    purpose: "Verifier role (Inquiry) — searches for supporting evidence for the hypothesis"
+    invariants:
+      - { kind: contains,  value: "supports" }
+      - { kind: contains,  value: "inconclusive" }
+      - { kind: contains,  value: "do not yourself produce `refutes`" }
+      - { kind: forbidden, value: "## Your examination angle" }
+
+  - id: role-falsifier
+    path: references/roles/falsifier.md
+    loaded_by: role-session
+    purpose: "Falsifier role (Inquiry) — searches for counter-evidence and failure modes"
+    invariants:
+      - { kind: contains,  value: "refutes" }
+      - { kind: contains,  value: "inconclusive" }
+      - { kind: forbidden, value: "do NOT search for supporting evidence" }
+
+  - id: role-triangulator
+    path: references/roles/triangulator.md
+    loaded_by: role-session
+    purpose: "Triangulator role (Inquiry) — surfaces orthogonal evidence"
+    invariants:
+      - { kind: contains,  value: "lateral" }
+      - { kind: contains,  value: "orthogonal" }
+      - { kind: contains,  value: "inconclusive" }
+
+  - id: output-format-inquiry
+    path: references/output-format-inquiry.md
+    loaded_by: role-session
+    purpose: "Inquiry preset output format spec — TL;DR with stance + source-kind tags + Argument"
+    invariants:
+      - { kind: contains_all, values: ["## TL;DR", "[stance:", "[source-kind:", "## Argument"] }
+      - { kind: contains_all, values: ["supports", "refutes", "lateral", "inconclusive"] }
+      - { kind: contains_all, values: ["empirical", "mechanism", "analogy", "theoretical", "counter-example"] }
+
+  - id: stance-tags-inquiry
+    path: references/stance-tags-inquiry.md
+    loaded_by: role-system-prompt
+    purpose: "Inquiry stance closed set with per-role mutex"
+    invariants:
+      - { kind: contains_all, values: ["supports", "refutes", "lateral", "inconclusive"] }
+      - { kind: contains, value: "Per-role mutex" }
+
+  - id: mode-inquiry
+    path: references/modes/inquiry.md
+    loaded_by: moderator-optional
+    purpose: "Inquiry preset metadata — role-topology, stance-contract, checkpoint-policy"
+    invariants:
+      - { kind: contains_all, values: ["preset: inquiry", "role-topology:", "stance-contract:", "checkpoint-policy:", "output-format:", "source-kind-tag:"] }
+      - { kind: contains, value: "per-role-mutex:" }

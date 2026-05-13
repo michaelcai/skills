@@ -94,11 +94,21 @@ got=$("$DP" "should we deprecate the old API" | cut -d: -f1)
 assert_eq "$got" "deliberation" "deliberation: 'should we' trigger"
 
 # Persuasion (default) — no indicator
-got=$("$DP" "X 这个设计是不是有问题" | cut -d: -f1)
-assert_eq "$got" "persuasion" "persuasion: no deliberation indicator"
-
 got=$("$DP" "is approach X correct" | cut -d: -f1)
 assert_eq "$got" "persuasion" "persuasion: correctness question"
+
+# Inquiry preset detection
+echo ""
+echo "Test: inquiry preset detection — detect-preset.sh"
+
+got=$("$DP" "$(cat "$FIXTURE_DIR/inquiry-hypothesis-en.txt")" | cut -d: -f1)
+assert_eq "$got" "inquiry" "inquiry: english hypothesis fixture"
+
+got=$("$DP" "$(cat "$FIXTURE_DIR/inquiry-hypothesis-cn.txt")" | cut -d: -f1)
+assert_eq "$got" "inquiry" "inquiry: chinese hypothesis fixture"
+
+got=$("$DP" "X 这个设计是不是有问题" | cut -d: -f1)
+assert_eq "$got" "inquiry" "inquiry: 是不是 trigger"
 
 echo ""
 echo "================================================"
