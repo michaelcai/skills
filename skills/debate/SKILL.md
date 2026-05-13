@@ -397,12 +397,38 @@ case "$PRESET" in
   discovery)    STANCE_WHITELIST="expand,challenge,connect,converge" ;;
 esac
 
+# Per-role narrowed whitelist (see "Per-role stance whitelist" subsection below).
+# For Persuasion / Deliberation the role-narrowed whitelist == preset-wide whitelist.
+role_stance_whitelist() {
+  local preset="$1" role="$2"
+  case "$preset" in
+    inquiry)
+      case "$role" in
+        verifier)     echo "supports,inconclusive" ;;
+        falsifier)    echo "refutes,inconclusive" ;;
+        triangulator) echo "lateral,inconclusive" ;;
+        *)            echo "$STANCE_WHITELIST" ;;   # wildcard: full preset whitelist
+      esac
+      ;;
+    discovery)
+      case "$role" in
+        wildcard)     echo "$STANCE_WHITELIST" ;;   # wildcard: full preset whitelist
+        *)            echo "expand,connect,converge" ;;  # Explorers: no `challenge`
+      esac
+      ;;
+    *)
+      echo "$STANCE_WHITELIST"
+      ;;
+  esac
+}
+
 mkdir -p "$DEBATE_DIR/tldrs" "$DEBATE_DIR/stances"
 for r in "${ACTIVE_ROLES[@]}"; do
   agent-session describe --role-id "$r" --state-dir "$SESSIONS_DIR" >/dev/null 2>&1 || continue
+  rwl=$(role_stance_whitelist "$PRESET" "$r")
   json=$(agent-session tldr \
     --role-id "$r" --state-dir "$SESSIONS_DIR" \
-    --stance-whitelist "$STANCE_WHITELIST")
+    --stance-whitelist "$rwl")
   echo "$json" | jq -r '.tldr_text // ""' > "$DEBATE_DIR/tldrs/$r.md"
   echo "$json" | jq -r '.stance    // "null"' > "$DEBATE_DIR/stances/$r.txt"
   # Also append to per-role accumulated history (for reconcile re-spawn context)
@@ -415,6 +441,22 @@ done
 
 The output extraction format (i.e. how `## TL;DR` and `[stance: ...]` get parsed) is owned by agent-session — debate only consumes the structured fields. A role with `stance: null` cached here is the canonical signal handled in §False-consensus guard.
 
+###### Per-role stance whitelist (Inquiry / Discovery)
+
+`role_stance_whitelist` narrows the preset-wide whitelist to the closed set each role
+is allowed to emit, then feeds that narrowed set into `agent-session tldr
+--stance-whitelist`. **This is THE runtime enforcement mechanism for per-role mutex.**
+Without it, agent-session would accept any preset-level stance — e.g. Verifier
+outputting `refutes` would slip through silently because `refutes` is in the
+preset's `supports,refutes,lateral,inconclusive` set. With it, an out-of-mutex stance
+becomes `stance: null` (format drift), which trips the existing format-correction
+escalation in §False-consensus guard. Persuasion and Deliberation roles have no
+per-role mutex so their narrowed whitelist equals the preset whitelist (no behavior
+change). Inquiry: V→{supports,inconclusive}, F→{refutes,inconclusive},
+T→{lateral,inconclusive}, W→full preset set. Discovery: Explorers→{expand,connect,converge}
+(no `challenge` — only Wildcard may challenge framings); Wildcard→full preset set;
+Compiler is not in `ACTIVE_ROLES` (no tldr extraction — see §Checkpoint trigger).
+
 Discovery introduces a second tag `[stage:]` alongside `[stance:]`. agent-session's `tldr` verb extracts only stance; debate extracts stage debate-side via `agent-session output` + grep, writes to `$DEBATE_DIR/stages/<role>.txt`. This keeps agent-session preset-agnostic.
 
 ```bash
@@ -425,6 +467,60 @@ if [ "$PRESET" = "discovery" ]; then
     out=$(agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" 2>/dev/null)
     stage=$(echo "$out" | grep -oE '\[stage:[[:space:]]*[a-z]+\]' | head -1 | grep -oE '[a-z]+' | tail -1)
     echo "${stage:-null}" > "$DEBATE_DIR/stages/$r.txt"
+  done
+fi
+```
+
+###### Discovery stage round-number validation
+
+The stage closed set is `{propose, refine, settle}` (§stage-tags-discovery). The
+round protocol from brainstorm D-D3 maps stages to round numbers — R1 MUST be
+`propose`, R2+ MUST be `refine` or `settle`. The check below surfaces violations
+into the same `failed` array used by the post-round output verification in §Send,
+so the moderator handles them through the existing format-correction escalation.
+
+```bash
+# Discovery: stage round-number validation
+if [ "$PRESET" = "discovery" ]; then
+  for r in "${ACTIVE_ROLES[@]}"; do
+    stage=$(cat "$DEBATE_DIR/stages/$r.txt" 2>/dev/null)
+    case "$N" in
+      1)
+        if [ "$stage" != "propose" ]; then
+          failed+=("$r:bad-stage-r1:$stage")
+        fi
+        ;;
+      *)
+        if [ "$stage" != "refine" ] && [ "$stage" != "settle" ]; then
+          failed+=("$r:bad-stage-r${N}:$stage")
+        fi
+        ;;
+    esac
+  done
+fi
+```
+
+###### Inquiry source-kind extraction + closed-set check
+
+`[source-kind:]` is the second tag added in brainstorm I-D3 to catch evidence-type
+drift (Verifier citing a counter-example to claim `supports`, etc.). The tag's
+closed set is `{empirical, mechanism, analogy, theoretical, counter-example}`. Like
+Discovery's stage tag, debate extracts source-kind debate-side (agent-session stays
+preset-agnostic), caches it per role, and surfaces any out-of-set value through the
+same `failed` array.
+
+```bash
+if [ "$PRESET" = "inquiry" ]; then
+  mkdir -p "$DEBATE_DIR/source-kinds"
+  for r in "${ACTIVE_ROLES[@]}"; do
+    out=$(agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" 2>/dev/null)
+    sk=$(echo "$out" | grep -oE '\[source-kind:[[:space:]]*[a-z-]+\]' | head -1 \
+         | sed -nE 's/.*\[source-kind:[[:space:]]*([a-z-]+)\].*/\1/p')
+    echo "${sk:-null}" > "$DEBATE_DIR/source-kinds/$r.txt"
+    case "${sk:-null}" in
+      empirical|mechanism|analogy|theoretical|counter-example) ;;
+      *) failed+=("$r:bad-source-kind:${sk:-null}") ;;
+    esac
   done
 fi
 ```
@@ -647,27 +743,80 @@ Text similarity is unreliable. Same TL;DR + different stance tags = strongest fa
 
 Re-spawning is expensive (loses the role's full conversation history) and reading past the issue is dishonest. Add a cheap intermediate step:
 
-1. **Single-turn format-correction send** to the affected role (~1 small send per role):
+1. **Single-turn format-correction send** to the affected role (~1 small send per role). The correction prompt body is **preset-aware** — Inquiry adds `[source-kind:]`, Discovery adds `[stage:]`, and the role's narrowed whitelist (from §After-round `role_stance_whitelist`) is substituted into the closed-set list so the role can't re-violate the per-role mutex on the corrected turn. Compiler (Discovery) has a different correction template since it emits no tags.
 
-   ```
+   Assemble the body via case block before writing `$DEBATE_DIR/format-correction-${r}.md`:
+
+   ```bash
+   ROLE_WL=$(role_stance_whitelist "$PRESET" "$r")   # narrowed per-role set
+   case "$PRESET" in
+     persuasion|deliberation)
+       cat > "$DEBATE_DIR/format-correction-${r}.md" <<EOF
    Your previous reply did not match the required output format.
    Send a corrected reply using EXACTLY this format:
 
      ## TL;DR
      <2-3 sentences>
-     [stance: <one value from the active preset whitelist>]   ← pick ONE from the closed set, no compound stances
+     [stance: <ONE of: ${ROLE_WL}>]
 
      ## Argument
      <body>
 
    Do not explain the issue. Send only the corrected reply.
-   ```
+   EOF
+       ;;
+     inquiry)
+       cat > "$DEBATE_DIR/format-correction-${r}.md" <<EOF
+   Your previous reply did not match the required output format.
+   Send a corrected reply using EXACTLY this format:
 
-   ```bash
-   agent-session send --role-id "<role>" \
-     --prompt-file "$DEBATE_DIR/format-correction.md" \
+     ## TL;DR
+     <2-3 sentences>
+     [stance: <ONE of: ${ROLE_WL}>]
+     [source-kind: <ONE of: empirical|mechanism|analogy|theoretical|counter-example>]
+
+     ## Argument
+     <body>
+
+   Do not explain the issue. Send only the corrected reply.
+   EOF
+       ;;
+     discovery)
+       # For Explorers / Wildcard. Compiler correction is separate (see §Checkpoint).
+       # ROUND_ALLOWED_STAGES per round-number protocol: R1=propose, R2+=refine|settle
+       if [ "$N" = "1" ]; then ROUND_ALLOWED_STAGES="propose"
+       else                    ROUND_ALLOWED_STAGES="refine|settle"
+       fi
+       cat > "$DEBATE_DIR/format-correction-${r}.md" <<EOF
+   Your previous reply did not match the required output format.
+   Send a corrected reply using EXACTLY this format:
+
+     ## TL;DR
+     <2-3 sentences>
+     [stage: <ONE of: ${ROUND_ALLOWED_STAGES}>]
+     [stance: <ONE of: ${ROLE_WL}>]
+
+     ## Argument
+     <body>
+
+   Do not explain the issue. Send only the corrected reply.
+   EOF
+       ;;
+   esac
+
+   agent-session send --role-id "$r" \
+     --prompt-file "$DEBATE_DIR/format-correction-${r}.md" \
      --state-dir "$SESSIONS_DIR"
    ```
+
+   `{ROLE_NARROWED_WHITELIST}` / `{ROUND_ALLOWED_STAGES}` are runtime substitutions the
+   moderator computes before sending the correction — they ensure the corrected reply
+   can't re-violate the mutex by picking a stance outside the role's allowed set.
+
+   Compiler (Discovery) format-correction is different — Compiler emits no `[stage:]`
+   or `[stance:]` tags, only the 4 section headers (Framing Matrix / Missing Axes /
+   Irreducible Divergences / Open Questions). See §Compiler output validation
+   (under §Checkpoint trigger) for Compiler's correction template.
 
 2. Re-run the `tldr` extraction for that role with the active preset's `--stance-whitelist`. If stance is now in the active whitelist, the corrected reply **replaces** the prior round's cached TL;DR — continue with the round's stance distribution as if nothing went wrong.
 
@@ -686,7 +835,11 @@ For **deliberation**: all stakeholders have contributed ≥1 round AND (round_co
 
 For **inquiry**: every 3 rounds (same as Persuasion).
 
-For **discovery**: every 3 rounds AND (all Explorer stages reached `settle` at least once) — checkpoint activates Compiler which produces the framing matrix synthesis.
+For **discovery**: two-level trigger.
+- **Periodic Compiler checkpoint** every 3 rounds (regardless of stage state) — gives the user a synthesis cadence even mid-exploration.
+- **Final Compiler synthesis** fires the moment all Explorer stages reach `settle` (discovery is complete; producing the final framing matrix immediately is more useful than waiting for the next round-3 boundary).
+
+Both trigger paths run the same Compiler activation flow (see "Compiler activation" below).
 
 **Example**: 3 stakeholders, round 2, stances `{prefer, accept, prefer}` → fires (all contributed AND all-prefer-accept; trade-off resolved). Same setup at round 2 with stances `{prefer, oppose, accept}` → does NOT fire (need round ≥ 3 because the `oppose` indicates unresolved tension worth more rounds).
 
@@ -756,6 +909,77 @@ For **inquiry**:
 - Hypothesis verdict: {tentatively supported / falsified / disputed / insufficient}
 - Next: {more rounds along axis X / sufficient to decide}
 ```
+
+##### Compiler activation (Discovery only)
+
+Compiler does not participate per-round (it is not in `ACTIVE_ROLES`). At each
+checkpoint trigger — periodic (every 3 rounds) or final (all stages `settle`) —
+the moderator brings Compiler online:
+
+1. **Spawn Compiler on demand** (first checkpoint only; subsequent checkpoints
+   reuse the same session so context accumulates):
+
+   ```bash
+   if ! agent-session describe --role-id compiler --state-dir "$SESSIONS_DIR" >/dev/null 2>&1; then
+     # Save the assembled identity per §2.5 reconcile anchor convention
+     cp references/roles/compiler.md "$DEBATE_DIR/roles/compiler.md"
+     agent-session spawn --backend "$compiler_backend" --model "$compiler_model" \
+       --role-id compiler --state-dir "$SESSIONS_DIR" \
+       --system-prompt "$COMPILER_SYS" \
+       --prompt-file "$DEBATE_DIR/roles/compiler.md" \
+       --timeout 900
+   fi
+   ```
+
+2. **Send checkpoint input**: assemble `$DEBATE_DIR/checkpoint-${N}-input.md` by
+   concatenating `$DEBATE_DIR/tldrs/*.md`, `$DEBATE_DIR/stages/*.txt`, and
+   `$DEBATE_DIR/running-summary.md` (if exists). Then:
+
+   ```bash
+   agent-session send --role-id compiler --state-dir "$SESSIONS_DIR" \
+     --prompt-file "$DEBATE_DIR/checkpoint-${N}-input.md" --timeout 900
+   ```
+
+   On second+ checkpoint Compiler's session retains earlier checkpoints, so the
+   input file can include only the new round's TL;DRs delta — round_count
+   semantically tracks how many checkpoints Compiler has done.
+
+3. **Validate Compiler output** — Compiler MUST NOT emit recommendations,
+   rankings, or "best option" framings (per brainstorm D-D2 + role-compiler
+   manifest invariants). The runtime grep below catches a drifted Compiler
+   reply; if any forbidden pattern hits, treat as format violation and send
+   the Compiler-specific correction template:
+
+   ```bash
+   c_out=$(agent-session output --role-id compiler --state-dir "$SESSIONS_DIR")
+   if echo "$c_out" | grep -qE '^## Recommendation|^## Best Option|^## Ranking|we recommend|best option|ranking from best'; then
+     cat > "$DEBATE_DIR/compiler-correction.md" <<'EOF'
+   Your previous reply contained forbidden sections (Recommendation / Best Option /
+   Ranking) or phrasing (we recommend / best option / ranking from best). Compiler's
+   role is to compile, not to recommend.
+
+   Send a corrected reply using EXACTLY these 4 section headers and nothing else:
+
+     ## Framing Matrix
+     ## Missing Axes
+     ## Irreducible Divergences
+     ## Open Questions
+
+   Do NOT include: [stage:], [stance:], Recommendation, Best Option, Ranking,
+   "we recommend", "best option". Send only the corrected reply.
+   EOF
+     agent-session send --role-id compiler --state-dir "$SESSIONS_DIR" \
+       --prompt-file "$DEBATE_DIR/compiler-correction.md" --timeout 900
+     c_out=$(agent-session output --role-id compiler --state-dir "$SESSIONS_DIR")
+   fi
+   ```
+
+   (The forbidden patterns mirror the manifest invariants on `role-compiler` —
+   if Compiler's `compiler.md` ever drifts to allow these, both the manifest
+   check and the runtime grep would catch it.)
+
+4. **Render checkpoint** using Compiler's validated output verbatim (the 4
+   sections become the body of the Discovery checkpoint template below).
 
 For **discovery**:
 

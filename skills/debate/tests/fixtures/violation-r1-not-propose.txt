@@ -1,0 +1,8 @@
+## TL;DR
+Locking in a final framing already at R1 before any peer exchange.
+[stage: settle]
+[stance: converge]
+
+## Argument
+R1 reply with `stage: settle` (illegal per Discovery round-protocol: R1 MUST be
+`propose`; `refine`/`settle` only allowed R2+).

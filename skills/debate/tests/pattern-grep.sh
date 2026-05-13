@@ -75,6 +75,16 @@ assert_match "Discovery introduces a second tag" "After-round step must explain 
 assert_no_match "Compiler recommends" "Compiler must NOT have 'recommends' verb anywhere in SKILL.md"
 assert_no_match "Compiler[[:space:]]+chooses" "Compiler must NOT have 'chooses' verb"
 
+# C-fix: runtime enforcement assertions
+assert_match "role_stance_whitelist" "After-round must define role_stance_whitelist function (per-role narrowed whitelist)"
+assert_match "Per-role stance whitelist \\(Inquiry / Discovery\\)" "§After-round must document per-role whitelist as runtime enforcement"
+assert_match "bad-stage-r1" "Discovery stage round-number validation must surface bad-stage-r1 via failed array"
+assert_match "bad-source-kind" "Inquiry source-kind closed-set validation must surface bad-source-kind via failed array"
+assert_match "Compiler activation \\(Discovery only\\)" "§Checkpoint must document Compiler spawn/send/validate flow"
+assert_match "compiler-correction.md" "Compiler reject-output path must emit a correction send"
+assert_match "Periodic Compiler checkpoint" "Discovery checkpoint trigger must distinguish periodic vs final"
+assert_match "Final Compiler synthesis" "Discovery checkpoint trigger must mention final-synthesis condition"
+
 echo
 if [[ $fail -gt 0 ]]; then
   echo "FAILED: $fail check(s)"

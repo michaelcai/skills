@@ -11,6 +11,35 @@ set -eu
 
 challenge="${1:?usage: detect-preset.sh <challenge text>}"
 
+# Discovery indicators: open exploration when user doesn't know options/proposal/hypothesis.
+# Checked FIRST: discovery's "I don't know" shapes are more specific than deliberation's
+# "should we" — e.g. `我不知道该不该用 X` is intent="I don't know", not a trade-off question
+# (`不知道` includes `该不该` as substring, so order matters for correct routing).
+declare -a discovery_keywords=(
+  # Chinese
+  "怎么写"
+  "怎么做"
+  "如何(写|做|设计|实现|选|安排|处理)"
+  "用什么"
+  "什么样"
+  "不知道(用|选|怎么|该|从哪|该不该|该用|该选)"
+  "没想好"
+  "想了解"
+  # English
+  " how should "
+  " how do i "
+  " what kind of "
+  " not sure what "
+  " don't know how "
+)
+
+for kw in "${discovery_keywords[@]}"; do
+  if echo " $challenge " | grep -qiE -- "$kw"; then
+    echo "discovery:${kw}"
+    exit 0
+  fi
+done
+
 # Deliberation indicators (CJK + English). One match wins.
 # These signal: trade-off, multi-option choice, stakeholder conflict.
 declare -a deliberation_keywords=(
@@ -38,32 +67,6 @@ declare -a deliberation_keywords=(
 for kw in "${deliberation_keywords[@]}"; do
   if echo " $challenge " | grep -qiE -- "$kw"; then
     echo "deliberation:${kw}"
-    exit 0
-  fi
-done
-
-# Discovery indicators: open exploration when user doesn't know options/proposal/hypothesis.
-declare -a discovery_keywords=(
-  # Chinese
-  "怎么写"
-  "怎么做"
-  "如何(写|做|设计|实现|选|安排|处理)"
-  "用什么"
-  "什么样"
-  "不知道(用|选|怎么|该|从哪|该不该|该用|该选)"
-  "没想好"
-  "想了解"
-  # English
-  " how should "
-  " how do i "
-  " what kind of "
-  " not sure what "
-  " don't know how "
-)
-
-for kw in "${discovery_keywords[@]}"; do
-  if echo " $challenge " | grep -qiE -- "$kw"; then
-    echo "discovery:${kw}"
     exit 0
   fi
 done

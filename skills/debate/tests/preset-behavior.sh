@@ -120,6 +120,84 @@ assert_eq "$got" "discovery" "discovery: chinese open-question fixture"
 got=$("$DP" "$(cat "$FIXTURE_DIR/discovery-open-en.txt")" | cut -d: -f1)
 assert_eq "$got" "discovery" "discovery: english open-question fixture"
 
+# C-fix: ordering — "我不知道该不该 X" should now route to discovery, not deliberation
+got=$("$DP" "我不知道该不该用 X" | cut -d: -f1)
+assert_eq "$got" "discovery" "C-fix: 我不知道该不该 → discovery (was deliberation pre-reorder)"
+
+# ============================================================
+# Test 4: C-fix — per-role narrowed whitelist catches mutex violations
+# ============================================================
+# Stage a fake Verifier session whose output emits stance=refutes (illegal —
+# Verifier's narrowed whitelist is {supports,inconclusive}). Without the
+# narrowed whitelist, tldr would return stance="refutes" (preset-wide set
+# accepts it); with the narrowed whitelist, stance must be null (format drift).
+echo ""
+echo "Test: C-fix — per-role narrowed whitelist enforces mutex"
+
+V_STATE="$TMPDIR_BASE/inquiry-violation"
+mkdir -p "$V_STATE/verifier/output"
+cp "$FIXTURE_DIR/violation-verifier-refutes.txt" "$V_STATE/verifier/output/r0.txt"
+cat > "$V_STATE/verifier/meta.json" <<META
+{"role_id":"verifier","backend":"claude","model":null,"round_count":1,"state":"active"}
+META
+
+# Preset-wide whitelist: stance=refutes IS accepted (this is the bug C-fix closes)
+got=$("$AS" tldr --role-id verifier --state-dir "$V_STATE" \
+      --stance-whitelist "supports,refutes,lateral,inconclusive" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["stance"])')
+assert_eq "$got" "refutes" "preset-wide whitelist would let Verifier:refutes through (the gap C-fix closes)"
+
+# Narrowed whitelist (Verifier mutex): stance must be null (format drift signal)
+got=$("$AS" tldr --role-id verifier --state-dir "$V_STATE" \
+      --stance-whitelist "supports,inconclusive" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["stance"] is None)')
+assert_eq "$got" "True" "C-fix: narrowed whitelist {supports,inconclusive} → stance=null for refutes"
+
+# Same shape for Discovery Explorer emitting stance=challenge (illegal — Explorer set is {expand,connect,converge})
+E_STATE="$TMPDIR_BASE/discovery-violation"
+mkdir -p "$E_STATE/explorer-a/output"
+cp "$FIXTURE_DIR/violation-explorer-challenge.txt" "$E_STATE/explorer-a/output/r0.txt"
+cat > "$E_STATE/explorer-a/meta.json" <<META
+{"role_id":"explorer-a","backend":"claude","model":null,"round_count":1,"state":"active"}
+META
+
+got=$("$AS" tldr --role-id explorer-a --state-dir "$E_STATE" \
+      --stance-whitelist "expand,connect,converge" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["stance"] is None)')
+assert_eq "$got" "True" "C-fix: Explorer narrowed whitelist {expand,connect,converge} → stance=null for challenge"
+
+# Wildcard's wider whitelist DOES accept `challenge` (only Explorers are blocked)
+got=$("$AS" tldr --role-id explorer-a --state-dir "$E_STATE" \
+      --stance-whitelist "expand,challenge,connect,converge" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["stance"])')
+assert_eq "$got" "challenge" "C-fix: Wildcard's full whitelist accepts challenge (sanity check)"
+
+# ============================================================
+# Test 5: C-fix — runtime validation patterns documented in SKILL.md
+# ============================================================
+# Belt-and-suspenders: the runtime stage-validator + source-kind-validator
+# are documented as shell snippets that downstream LLMs will execute.
+# Cover their presence via SKILL.md pattern grep (the assertions live in
+# pattern-grep.sh; here we test the underlying string/format the validator
+# would emit so a future refactor doesn't silently drop them).
+echo ""
+echo "Test: C-fix — Discovery stage round-number validation snippet"
+
+SKILL_FILE="$SCRIPT_DIR/../SKILL.md"
+got=$(grep -c '"\$r:bad-stage-r1' "$SKILL_FILE")
+assert_eq "$got" "1" "Discovery R1 stage violator emits 'bad-stage-r1'"
+
+got=$(grep -c 'bad-stage-r\${N}' "$SKILL_FILE")
+assert_eq "$got" "1" "Discovery R2+ stage violator emits 'bad-stage-r\${N}'"
+
+got=$(grep -c '"\$r:bad-source-kind' "$SKILL_FILE")
+assert_eq "$got" "1" "Inquiry bad-source-kind validator emits 'bad-source-kind'"
+
+# Compiler runtime guard against Recommendation/Best Option/Ranking
+got=$(grep -cE '\^## Recommendation\|\^## Best Option\|\^## Ranking' "$SKILL_FILE")
+[ "$got" -ge 1 ] && got=1 || got=0
+assert_eq "$got" "1" "Compiler output validator greps for forbidden sections (Recommendation/Best Option/Ranking)"
+
 echo ""
 echo "================================================"
 echo "Result: $PASS passed, $FAIL failed"

@@ -1,0 +1,9 @@
+## TL;DR
+The framing axis itself is wrong — we should not be asking "how to document" but
+"whether to document at all".
+[stage: refine]
+[stance: challenge]
+
+## Argument
+Explorer emitted `challenge` (illegal per Discovery per-role mutex: Explorer
+stance ∈ {expand,connect,converge}; only Wildcard may challenge).

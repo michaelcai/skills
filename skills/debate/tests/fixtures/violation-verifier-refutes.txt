@@ -1,0 +1,9 @@
+## TL;DR
+The hypothesis fails on the production-load case — measurements at 10× throughput
+show the predicted invariant breaks under contention.
+[stance: refutes]
+[source-kind: counter-example]
+
+## Argument
+Verifier emitted `refutes` (illegal per Inquiry per-role mutex: V→{supports,inconclusive}).
+This fixture tests that the narrowed whitelist filter catches the violation.

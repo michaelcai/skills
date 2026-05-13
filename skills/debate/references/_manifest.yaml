@@ -188,7 +188,14 @@ modules:
     invariants:
       - { kind: contains,  value: "refutes" }
       - { kind: contains,  value: "inconclusive" }
-      - { kind: forbidden, value: "do NOT search for supporting evidence" }
+      # Positive assertion: the role file MUST instruct falsifier to not search for
+      # supporting evidence (that is Verifier's job). Earlier this was phrased as a
+      # `forbidden:` invariant which (a) had the wrong semantics — it told the test to
+      # FAIL when the desired guard text was present — and (b) was case-sensitive against
+      # `Do NOT` capitalization in the file, silently passing. C-fix flips it to contains.
+      - { kind: contains,  value: "Do NOT search for supporting evidence" }
+      # And explicitly forbid the inverse — falsifier MUST NOT produce `supports`
+      - { kind: contains,  value: "do not produce `supports`" }
 
   - id: role-triangulator
     path: references/roles/triangulator.md
@@ -201,7 +208,7 @@ modules:
 
   - id: output-format-inquiry
     path: references/output-format-inquiry.md
-    loaded_by: role-session
+    loaded_by: role-system-prompt
     purpose: "Inquiry preset output format spec — TL;DR with stance + source-kind tags + Argument"
     invariants:
       - { kind: contains_all, values: ["## TL;DR", "[stance:", "[source-kind:", "## Argument"] }
@@ -247,7 +254,7 @@ modules:
 
   - id: output-format-discovery
     path: references/output-format-discovery.md
-    loaded_by: role-session
+    loaded_by: role-system-prompt
     purpose: "Discovery preset output format spec — TL;DR with stage + stance tags + Argument"
     invariants:
       - { kind: contains_all, values: ["## TL;DR", "[stage:", "[stance:", "## Argument"] }
