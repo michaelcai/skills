@@ -1,0 +1,1 @@
+How should I design the error-handling layer for a new service when I don't yet know what failure modes to expect?

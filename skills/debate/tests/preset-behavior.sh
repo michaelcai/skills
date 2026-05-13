@@ -110,6 +110,16 @@ assert_eq "$got" "inquiry" "inquiry: chinese hypothesis fixture"
 got=$("$DP" "X 这个设计是不是有问题" | cut -d: -f1)
 assert_eq "$got" "inquiry" "inquiry: 是不是 trigger"
 
+# Discovery preset detection
+echo ""
+echo "Test: discovery preset detection — detect-preset.sh"
+
+got=$("$DP" "$(cat "$FIXTURE_DIR/discovery-open-cn.txt")" | cut -d: -f1)
+assert_eq "$got" "discovery" "discovery: chinese open-question fixture"
+
+got=$("$DP" "$(cat "$FIXTURE_DIR/discovery-open-en.txt")" | cut -d: -f1)
+assert_eq "$got" "discovery" "discovery: english open-question fixture"
+
 echo ""
 echo "================================================"
 echo "Result: $PASS passed, $FAIL failed"

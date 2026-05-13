@@ -63,6 +63,18 @@ assert_match "ACTIVE_ROLES=\\(verifier falsifier triangulator wildcard\\)" \
 assert_match "For \\*\\*inquiry\\*\\*:" "Inquiry checkpoint trigger / distribution / conclude blocks must reference preset by name"
 assert_match "output-format-inquiry.md" "§2.4 must reference output-format-inquiry.md"
 
+# Discovery preset assertions
+assert_match "##### 2.3-d Discovery preset" "§2.3-d Discovery preset assignment section must exist"
+assert_match "discovery\\)    STANCE_WHITELIST=\"expand,challenge,connect,converge\"" \
+    "§2.5 case must set discovery STANCE_WHITELIST"
+assert_match "ACTIVE_ROLES=\\(\"\\\$\\{EXPLORER_SLUGS\\[@\\]\\}\" wildcard\\)" \
+    "§2.5 case must set discovery ACTIVE_ROLES (Explorer slugs + wildcard, no Compiler)"
+assert_match "For \\*\\*discovery\\*\\*:" "Discovery sections must reference preset by name"
+assert_match "output-format-discovery.md" "§2.4 must reference output-format-discovery.md"
+assert_match "Discovery introduces a second tag" "After-round step must explain 2-tag stage extraction"
+assert_no_match "Compiler recommends" "Compiler must NOT have 'recommends' verb anywhere in SKILL.md"
+assert_no_match "Compiler[[:space:]]+chooses" "Compiler must NOT have 'chooses' verb"
+
 echo
 if [[ $fail -gt 0 ]]; then
   echo "FAILED: $fail check(s)"

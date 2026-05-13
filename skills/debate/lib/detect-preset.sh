@@ -42,6 +42,32 @@ for kw in "${deliberation_keywords[@]}"; do
   fi
 done
 
+# Discovery indicators: open exploration when user doesn't know options/proposal/hypothesis.
+declare -a discovery_keywords=(
+  # Chinese
+  "怎么写"
+  "怎么做"
+  "如何(写|做|设计|实现|选|安排|处理)"
+  "用什么"
+  "什么样"
+  "不知道(用|选|怎么|该|从哪|该不该|该用|该选)"
+  "没想好"
+  "想了解"
+  # English
+  " how should "
+  " how do i "
+  " what kind of "
+  " not sure what "
+  " don't know how "
+)
+
+for kw in "${discovery_keywords[@]}"; do
+  if echo " $challenge " | grep -qiE -- "$kw"; then
+    echo "discovery:${kw}"
+    exit 0
+  fi
+done
+
 # Inquiry indicators: hypothesis verification phrasing.
 declare -a inquiry_keywords=(
   # Chinese

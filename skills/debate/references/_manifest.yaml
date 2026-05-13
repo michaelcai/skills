@@ -223,3 +223,61 @@ modules:
     invariants:
       - { kind: contains_all, values: ["preset: inquiry", "role-topology:", "stance-contract:", "checkpoint-policy:", "output-format:", "source-kind-tag:"] }
       - { kind: contains, value: "per-role-mutex:" }
+
+  # Discovery preset modules
+  - id: role-explorer
+    path: references/roles/explorer.md
+    loaded_by: role-session
+    purpose: "Explorer role (Discovery) — independent framing-axis proposer"
+    invariants:
+      - { kind: contains, value: "framing axis" }
+      - { kind: contains, value: "stage=propose" }
+      - { kind: contains, value: "Never `challenge` framing premises" }
+
+  - id: role-compiler
+    path: references/roles/compiler.md
+    loaded_by: moderator-optional
+    purpose: "Compiler role (Discovery) — checkpoint matrix synthesizer; explicitly no-recommendation"
+    invariants:
+      - { kind: contains_all, values: ["Framing Matrix", "Missing Axes", "Irreducible Divergences", "Open Questions"] }
+      - { kind: contains, value: "## What you MUST NOT do" }
+      - { kind: contains, value: "No Recommendation section" }
+      - { kind: contains, value: "No Ranking section" }
+      - { kind: contains, value: "No Stance / Stage tags" }
+
+  - id: output-format-discovery
+    path: references/output-format-discovery.md
+    loaded_by: role-session
+    purpose: "Discovery preset output format spec — TL;DR with stage + stance tags + Argument"
+    invariants:
+      - { kind: contains_all, values: ["## TL;DR", "[stage:", "[stance:", "## Argument"] }
+      - { kind: contains_all, values: ["propose", "refine", "settle"] }
+      - { kind: contains_all, values: ["expand", "challenge", "connect", "converge"] }
+
+  - id: stage-tags-discovery
+    path: references/stage-tags-discovery.md
+    loaded_by: role-system-prompt
+    purpose: "Discovery stage closed set with per-round mutex"
+    invariants:
+      - { kind: contains_all, values: ["propose", "refine", "settle"] }
+      - { kind: contains, value: "Round mutex" }
+
+  - id: stance-tags-discovery
+    path: references/stance-tags-discovery.md
+    loaded_by: role-system-prompt
+    purpose: "Discovery stance closed set with per-role mutex"
+    invariants:
+      - { kind: contains_all, values: ["expand", "challenge", "connect", "converge"] }
+      - { kind: contains, value: "Per-role mutex" }
+      - { kind: contains, value: "Compiler does not emit" }
+      # ↑ positive assertion: the file MUST phrase Compiler's exclusion as "does not emit"
+      #   (forbidden: "Compiler emits" would self-defeat — the substring "Compiler ... emits"
+      #   appears inside the moderator-reading table row about format violations)
+
+  - id: mode-discovery
+    path: references/modes/discovery.md
+    loaded_by: moderator-optional
+    purpose: "Discovery preset metadata — role-topology, two-tag-system, checkpoint-policy with forbidden-sections"
+    invariants:
+      - { kind: contains_all, values: ["preset: discovery", "role-topology:", "tag-system:", "checkpoint-policy:", "two-tag"] }
+      - { kind: contains_all, values: ["forbidden-sections:", "recommendation", "best-option", "ranking"] }

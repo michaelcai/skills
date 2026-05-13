@@ -72,7 +72,7 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
    ```
    --preset flag → lib/detect-preset.sh on challenge text → fallback persuasion
    ```
-   The auto-detect heuristic matches keywords in the challenge text. If a deliberation indicator matches, recommend `deliberation`; if an inquiry indicator matches, recommend `inquiry`; otherwise default to `persuasion`. The preflight gate always displays which preset is active and why.
+   The auto-detect heuristic matches keywords in the challenge text. If a deliberation indicator matches, recommend `deliberation`; if a discovery indicator matches, recommend `discovery`; if an inquiry indicator matches, recommend `inquiry`; otherwise default to `persuasion`. The preflight gate always displays which preset is active and why.
 
 4. **Budget estimate**:
    ```
@@ -105,6 +105,19 @@ Edit list? (Y/n)  Default: use as-is
 ```
 
 The moderator extracts 2-4 stakeholders from the challenge text. If the user replies `edit`, they provide the replacement list before spawn.
+
+For **Discovery** preset, include framing-axes confirmation in the same gate:
+
+```
+Framing axes (for discovery):
+  A. <axis slug + 1-line description, extracted from challenge text>
+  B. <axis slug + 1-line description>
+  C. <axis slug + 1-line description>
+  [D. (optional fourth axis)]
+Edit list? (Y/n)  Default: use as-is
+```
+
+The moderator extracts 3-4 framing axes from the challenge text. If the user replies `edit`, they provide the replacement list before spawn. Each axis becomes one Explorer's framing.
 
 The running token counter reappears at the checkpoint trigger:
 
@@ -246,6 +259,27 @@ Model resolution follows the same priority chain (env → pool → default).
 
 Inquiry roles are fixed (4 total). The hypothesis itself, extracted from challenge text in §1.5, is prepended to every role's first-turn prompt as `Hypothesis under examination: <text>`.
 
+##### 2.3-d Discovery preset
+
+Roles are 3-4 Explorers + 1 Compiler + 1 Wildcard. Each Explorer represents one **framing axis** — extracted from challenge text in §1.5 preflight, confirmed by user.
+
+```
+For each framing axis F in confirmed-axes-list (3-4 of them):
+  Explorer-F → next-pool-entry, rotating to maximize family diversity
+Compiler  → cross-family from majority of Explorers
+              (Compiler structurally must NOT share the family of >50%
+               of Explorers — diversity is a hedge against bias propagation
+               in the synthesis step)
+Wildcard  → cross-family from majority for premise-challenging perspective drift
+```
+
+Model resolution follows the same priority chain.
+
+Framing axis extraction (§1.5):
+- main agent reads challenge text and proposes 3-4 distinct framing axes
+- preflight gate displays them; user can edit before spawn (default: accept)
+- each axis becomes a `<slug>: <1-line description>` prepended to that Explorer's first-turn prompt
+
 #### 2.3.1 Print decision and confirm
 
 ```
@@ -278,7 +312,7 @@ For each role's first-turn input, concatenate:
 - The role's identity template from `references/roles/<role-name>.md`
 - The preset's output-format spec from `references/output-format-<preset>.md`
 
-For Persuasion: `output-format-persuasion.md`. For Deliberation: `output-format-deliberation.md`. For Inquiry: `output-format-inquiry.md`.
+For Persuasion: `output-format-persuasion.md`. For Deliberation: `output-format-deliberation.md`. For Inquiry: `output-format-inquiry.md`. For Discovery: `output-format-discovery.md`.
 
 The system prompt at spawn for each role MUST include the preset's stance whitelist, which the role uses internally to constrain its `[stance: ...]` line.
 
@@ -303,6 +337,7 @@ case "$PRESET" in
   persuasion)   STANCE_WHITELIST="hold,concede,add" ;;
   deliberation) STANCE_WHITELIST="prefer,accept,oppose,abstain" ;;
   inquiry)      STANCE_WHITELIST="supports,refutes,lateral,inconclusive" ;;
+  discovery)    STANCE_WHITELIST="expand,challenge,connect,converge" ;;
 esac
 
 # Used in Round N send (parallel pids[]), output verification, and After-round tldr extraction loops
@@ -319,6 +354,11 @@ case "$PRESET" in
   inquiry)
     ACTIVE_ROLES=(verifier falsifier triangulator wildcard)
     # All 4 fixed; no conditional roles.
+    ;;
+  discovery)
+    # EXPLORER_SLUGS is the confirmed framing-axis list from preflight §1.5
+    # Compiler runs only at checkpoint (not per-round); not in ACTIVE_ROLES
+    ACTIVE_ROLES=("${EXPLORER_SLUGS[@]}" wildcard)
     ;;
 esac
 
@@ -354,6 +394,7 @@ case "$PRESET" in
   persuasion)   STANCE_WHITELIST="hold,concede,add" ;;
   deliberation) STANCE_WHITELIST="prefer,accept,oppose,abstain" ;;
   inquiry)      STANCE_WHITELIST="supports,refutes,lateral,inconclusive" ;;
+  discovery)    STANCE_WHITELIST="expand,challenge,connect,converge" ;;
 esac
 
 mkdir -p "$DEBATE_DIR/tldrs" "$DEBATE_DIR/stances"
@@ -373,6 +414,20 @@ done
 `ACTIVE_ROLES` is the per-preset role list set up at spawn, e.g. `(defender role-a role-b wildcard)` for Persuasion or `(stakeholder-A stakeholder-B stakeholder-C synthesizer)` for Deliberation.
 
 The output extraction format (i.e. how `## TL;DR` and `[stance: ...]` get parsed) is owned by agent-session — debate only consumes the structured fields. A role with `stance: null` cached here is the canonical signal handled in §False-consensus guard.
+
+Discovery introduces a second tag `[stage:]` alongside `[stance:]`. agent-session's `tldr` verb extracts only stance; debate extracts stage debate-side via `agent-session output` + grep, writes to `$DEBATE_DIR/stages/<role>.txt`. This keeps agent-session preset-agnostic.
+
+```bash
+# Discovery preset: also extract [stage:] for round-protocol enforcement
+if [ "$PRESET" = "discovery" ]; then
+  mkdir -p "$DEBATE_DIR/stages"
+  for r in "${ACTIVE_ROLES[@]}"; do
+    out=$(agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" 2>/dev/null)
+    stage=$(echo "$out" | grep -oE '\[stage:[[:space:]]*[a-z]+\]' | head -1 | grep -oE '[a-z]+' | tail -1)
+    echo "${stage:-null}" > "$DEBATE_DIR/stages/$r.txt"
+  done
+fi
+```
 
 ##### Pre-round step (assembling rN.md without reading TL;DRs)
 
@@ -574,6 +629,18 @@ For **inquiry**:
 | ≥1 stance violates per-role mutex (e.g., Verifier outputs `refutes`) | Format drift via mutex violation | Apply format-correction; if Verifier's evidence is genuinely counter, that signal belongs to Falsifier — moderator may relay |
 | stance/source-kind incoherent (e.g., `supports` + `counter-example`) | Heuristic warning | Read full Argument to verify; do not block round |
 
+For **discovery**:
+
+| Distribution | Reading | Action |
+|---|---|---|
+| All R2+ stages = `refine` | Healthy cross-pollination | Continue rounds |
+| ≥1 stage = `settle` at R2 | Early lock-in | Read that role's Argument; revive if disengagement, accept if real wall |
+| All R3 stages = `settle` | Discovery complete | Activate Compiler for final synthesis; checkpoint immediately |
+| Many `expand`, few `connect` | Explorers deepening but not learning across axes | Next-round focus block must explicitly probe "what did you take from peer X?" |
+| Wildcard `challenge` raised | Framing-axes set is being questioned | Moderator decides: add/remove/keep axes; communicate decision in next round's focus |
+| Compiler emits any `[stage:]` or `[stance:]` | Format violation (Compiler must not participate as a debater) | Apply format-correction; re-run Compiler at next checkpoint |
+| ≥1 stance/stage violates per-role mutex | Format drift | Apply format-correction (standard mechanism) |
+
 Text similarity is unreliable. Same TL;DR + different stance tags = strongest false-consensus warning. A `null` stance amid otherwise-valid stances does **not** count as "Mostly X" — it must be resolved first.
 
 ##### Format-correction escalation (for `null` stance)
@@ -618,6 +685,8 @@ For **persuasion**: every 3 rounds (unchanged).
 For **deliberation**: all stakeholders have contributed ≥1 round AND (round_count ≥ 3 OR all stances ∈ {prefer, accept}).
 
 For **inquiry**: every 3 rounds (same as Persuasion).
+
+For **discovery**: every 3 rounds AND (all Explorer stages reached `settle` at least once) — checkpoint activates Compiler which produces the framing matrix synthesis.
 
 **Example**: 3 stakeholders, round 2, stances `{prefer, accept, prefer}` → fires (all contributed AND all-prefer-accept; trade-off resolved). Same setup at round 2 with stances `{prefer, oppose, accept}` → does NOT fire (need round ≥ 3 because the `oppose` indicates unresolved tension worth more rounds).
 
@@ -686,6 +755,36 @@ For **inquiry**:
 ### You decide
 - Hypothesis verdict: {tentatively supported / falsified / disputed / insufficient}
 - Next: {more rounds along axis X / sufficient to decide}
+```
+
+For **discovery**:
+
+```markdown
+## Discovery progress @ Round N checkpoint
+(Explorer A @ R3:settle, Explorer B @ R3:refine, Explorer C @ R3:settle, Wildcard @ R3:converge)
+
+(Compiler's output begins here — Compiler is the synthesizer, not a debater)
+
+## Framing Matrix
+| Axis | Proposal | Confidence | Notes |
+|------|----------|------------|-------|
+| Axis A | (Explorer A's settled proposal) | high | ... |
+| Axis B | (Explorer B's refined proposal) | medium | still evolving |
+| Axis C | (Explorer C's settled proposal) | high | ... |
+
+## Missing Axes
+- (Wildcard's `challenge` suggestions or Compiler-inferred gaps; explicit "none" if none)
+
+## Irreducible Divergences
+- Axis A vs Axis C on dimension X: Axis A says ..., Axis C says ..., both `settle`d at `converge` — user decision
+
+## Open Questions
+- (Compiler-extracted questions; possibly added by Compiler itself but framed as "User: do you weigh ... above ...?", never as recommendations)
+
+### You decide
+- Accept matrix as-is and move on
+- Refine framing-axes set (add/remove an axis) and re-run a round
+- Specific question Compiler raised that you want to address
 ```
 
 User responses: "continue" → 3 more rounds; "switch direction" → adjust focus; "enough" → Step 4.
@@ -781,6 +880,31 @@ For **inquiry**:
 
 ### Open questions / Missing evidence
 - {explicit gaps; what would change the verdict}
+```
+
+For **discovery**:
+
+```markdown
+## Conclusion
+
+### Open question examined
+{verbatim from §1.5}
+
+### Framing axes (confirmed)
+{list of 3-4 axes}
+
+### Framing matrix
+{full Compiler matrix from checkpoint, optionally updated by final round}
+
+### Irreducible divergences
+{points where axes cannot reconcile; user must resolve}
+
+### Open questions surfaced
+{Compiler's questions still unanswered by debate; explicit user prompts}
+
+### What this Discovery did NOT settle
+- We did not recommend a single best framing — user picks
+- We did not pre-enumerate options — options *emerged* from Explorers' proposals
 ```
 
 ### Step 5: Cleanup
