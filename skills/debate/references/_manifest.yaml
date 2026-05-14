@@ -46,14 +46,6 @@ modules:
       - { kind: contains,  value: "NOT scoped" }
       - { kind: forbidden, value: "## Your examination angle" }
 
-  - id: parallel-tmux
-    path: references/parallel-tmux.md
-    loaded_by: moderator-optional
-    purpose: "tmux split-pane visualization (NOT a parallelism mechanism for agent-session itself)"
-    invariants:
-      - { kind: contains, value: "Visualization, not parallelism" }
-      - { kind: contains, value: "tmux" }
-
   # Deliberation-preset modules
   - id: role-stakeholder
     path: references/roles/stakeholder.md
@@ -137,7 +129,7 @@ modules:
       - { kind: contains,     value: "trade-off" }
 
   # SKILL.md orchestration discipline invariants
-  # Prevent regression of 2026-05-12 root-cause patterns
+  # Prevent regression of 2026-05-12 / 2026-05-14 opencode-yolo root-cause pattern
   - id: skill-orchestration-discipline
     path: SKILL.md
     loaded_by: moderator-optional
@@ -149,26 +141,27 @@ modules:
         # ScheduleWakeup blind-waits cannot detect a hung wrapper.
         # Note: the word "ScheduleWakeup" may appear in §Red Flags as a warning;
         # only the invocation pattern ScheduleWakeup( is forbidden.
-      - kind: forbidden
-        value: "run_in_background`"
-        # Bash run_in_background + internal & creates double-bg wrapper hang.
-        # See §Red Flags #1.
-        # Note: run_in_background may appear in §Red Flags as a warning label;
-        # only the backtick-invocation form (as used in instructions) is forbidden.
       - kind: contains_all
         values:
-          - "send fan-out 嵌套 Bash"
+          - "不带 `--yolo`"
           - "ScheduleWakeup 等 debate"
-          - "debate orchestration 本身放后台"
           - "wait` 拼接变量"
-        # §Red Flags must enumerate the 4 forbidden patterns from 2026-05-12
-        # debate runtime root-cause analysis.
+          - "fan-out 跨多个 Bash"
+          - "Bash tool 用默认 timeout"
+        # §Red Flags must enumerate the 5 current forbidden patterns.
+        # #1 (no --yolo) is the actual root cause confirmed 2026-05-14;
+        # the prior "double-bg" attribution was wrong and has been removed.
       - kind: contains_all
         values:
           - "exit 3"
           - "session-not-found"
           - "--initial-round"
         # Reconcile section must reference the agent-session CLI surface area.
+      - kind: contains_all
+        values:
+          - "--yolo"
+          - "opencode backend blocks on its interactive permission prompt"
+        # §2.5 MUST + §Red Flags must explain the opencode-yolo root cause.
 
   # Inquiry preset modules
   - id: role-verifier

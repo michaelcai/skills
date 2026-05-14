@@ -59,14 +59,7 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
    ```
    First non-empty match wins. **Always print the chosen value as a visible line** so autodetect doesn't become hidden state.
 
-2. **Parallelism / visualization**:
-   ```
-   --no-parallel flag → DEBATE_NO_TMUX → has TTY? → tmux on PATH?
-   ```
-   The `& ... wait` loop in §2.5 / §Round N already runs roles concurrently regardless. Tmux split-pane is *visualization* on top. Print honestly:
-   - TTY attached + tmux available → `Parallel: tmux (split panes)`
-   - TTY attached, tmux not installed → `Parallel: background subprocess (tmux not found)`
-   - **No TTY** (moderator running headless) → `Parallel: background subprocess (no TTY for tmux panes)` — don't promise split panes you won't deliver.
+2. **Live progress visibility**: roles run concurrently via the `& ... wait` loop in §2.5 / §Round N. To watch per-role output in real time, the user can run `tail -F $DEBATE_DIR/logs/send-*.log` in a separate shell. The preflight gate just prints the path so they know where.
 
 3. **Preset detection**:
    ```
@@ -87,7 +80,7 @@ Print one combined gate, wait for user:
 
 ```
 Language: zh (autodetected from challenge text, override with /debate --lang xx)
-Parallel: background subprocess (no TTY for tmux panes)
+Live progress: tail -F $DEBATE_DIR/logs/send-*.log (run in another shell to watch per-role output)
 Preset: <preset-name> (auto, matched "<keyword>" in challenge / default)
         Override with --preset <other> to force.
 Debate plan: 4 roles × ~6 rounds ≈ ~52k tokens, ~4 min wall-clock
@@ -331,6 +324,8 @@ Debate needs a **persistent multi-turn session per role**, with shared lifetime 
 
 **[MUST] Pass `--timeout 900` at spawn time.** agent-session's default ceiling (1800s) is generous, but `spawn` persists `meta.timeout` for the entire session lifetime — if you don't set it explicitly, sends inherit whatever the env was when spawn ran. Empirically, gpt-5.5-class reasoning models on round-3+ resumes can take 200-400s per turn; 900s gives ~3x headroom. If a specific round still trips it, `send --force --timeout 1500` bumps and retries (see §Round N).
 
+**[MUST] Pass `--yolo` on every `agent-session spawn` / `send` / `run` call.** Without it, opencode backend blocks on its interactive permission prompt (no stdin to approve), and the role's child process sits at 0% CPU forever — manifests as 0-byte log files, role stuck at the prior round_count, and the entire debate stalls until manually killed. claude backend inherits permission context from the Claude Code parent and so does not exhibit the symptom — the failure is opencode-specific but unpredictable per round. Debate is a trusted analysis context (CLAUDE.md guidance), so `--yolo` is correct here; the agent-session binary translates it to `--dangerously-skip-permissions` for opencode and the equivalent for other backends. **Confirmed 2026-05-14**: a 5-role discovery debate stalled three rounds in a row at exactly the 3 opencode roles before the missing flag was identified.
+
 ```bash
 # Derive whitelist from preset
 case "$PRESET" in
@@ -370,8 +365,6 @@ esac
 The `agent-session spawn` and `send` calls themselves don't change — the stance whitelist only affects post-hoc tldr extraction.
 
 After this step, each role's first-turn reply is observable via agent-session's `output` and `tldr` verbs; the role's full conversation history is owned by agent-session and never re-supplied by debate.
-
-For tmux *split-pane visualization* (not parallelism — concurrency comes from `& ... wait`): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
 ### Step 3: Discuss
 
@@ -540,11 +533,12 @@ dispatched in parallel.
 `run_in_background`.**
 
 ```bash
-# correct — foreground parallel
+# correct — foreground parallel, --yolo on every send (see §2.5 MUST)
 for r in "${ACTIVE_ROLES[@]}"; do
   agent-session send --role-id "$r" \
     --state-dir "$SESSIONS_DIR" \
     --prompt-file "$DEBATE_DIR/r${N}.md" \
+    --yolo \
     --timeout 1800 > "$DEBATE_DIR/logs/send-${r}-r${N}.log" 2>&1 &
   pids+=("$!")
 done
@@ -553,12 +547,35 @@ for pid in "${pids[@]}"; do
 done
 ```
 
-Why foreground: Bash tool `run_in_background` + internal `&` creates a
-double-bg situation where the harness severs the wrapper's stdio/job
-control, the wrapper hangs at 0% CPU, and the child processes never start.
-Confirmed in 2026-05-12 debate run (13 min wait for sends that never
-launched). 4 parallel 30-60s sends fit comfortably within Bash tool's
-default 120s timeout.
+Why foreground: keeps the orchestrator's control flow synchronous — the
+moderator sees per-role exit codes immediately and can react in the same
+turn. Acceptable wall-clock: 4 parallel 30-60s sends fit comfortably within
+Bash tool's 600s timeout (see [MUST] below).
+
+**Historical note.** A 2026-05-12 debate run hung 13 min with sends that
+never launched and was originally attributed to "double-bg severs
+stdio/job control" if `run_in_background` were used. That attribution was
+wrong — 2026-05-14 reproduction with sleep / Python+stdin children under
+`run_in_background` did **not** hang, and the real 2026-05-12 / 2026-05-14
+failures were both caused by missing `--yolo` (opencode blocking on
+permission prompt). Keep foreground anyway for the control-flow reason
+above; don't expect background to cause stdio severance.
+
+**[MUST] Bash tool `timeout: 600000`.** `agent-session --timeout` only
+bounds the agent-session subprocess; the outer Bash tool has a 120s
+default that will SIGKILL the whole wait block at 2 min. Set 600000
+(10 min) on the Bash call wrapping spawn/send fan-out. **Do NOT** reach
+for `run_in_background: true` as an escape hatch — that breaks the
+foreground synchronous flow above; the right fix is a larger Bash
+timeout.
+
+**[MUST] Single Bash call for fan-out.** All roles must be backgrounded
+(`&`) and waited within **one** Bash tool invocation. Spawning N roles
+across N separate Bash calls serializes them — wall-clock = sum-of-roles
+instead of max-of-roles — silently negating the parallelism the [MUST]
+above is trying to preserve. If a model is tempted to "send each role in
+its own Bash call to keep the logs clean", redirect each send's output to
+a separate log file inside the single Bash call instead.
 
 **[MUST] Collect per-role exit codes AND verify output.** A bare `wait` without arguments only waits, it doesn't surface individual failures. A round where `agent-session send` rejected a flag (e.g. `unrecognized arguments`) silently and `tldr` later returns the *previous round's* cached output is the classic false-success trap. Use this hardened pattern:
 
@@ -568,6 +585,7 @@ for r in "${ACTIVE_ROLES[@]}"; do
   agent-session send --role-id "$r" \
     --prompt-file "$DEBATE_DIR/rN.md" \
     --state-dir "$SESSIONS_DIR" \
+    --yolo \
     --timeout 1800 > "$DEBATE_DIR/logs/send-${r}-rN.log" 2>&1 &
   pids+=("$!")
   role_for_pid["$!"]="$r"
@@ -595,15 +613,13 @@ for entry in "${failed[@]}"; do
   role="${entry%%:*}"
   err=$(agent-session describe --role-id "$role" --state-dir "$SESSIONS_DIR" | jq -r '.error // ""')
   if echo "$err" | grep -q "timed out"; then
-    agent-session send --role-id "$role" --force --timeout 1500 \
+    agent-session send --role-id "$role" --force --yolo --timeout 1500 \
       --prompt-file "$DEBATE_DIR/rN.md" --state-dir "$SESSIONS_DIR"
   fi
 done
 ```
 
 If you want Defender to rebut this-round critic arguments, do it as an **optional follow-up half-round** (one extra `send` to Defender after collecting the others' r_N), not by ordering the main round. Reserve for the round just before a checkpoint.
-
-For tmux split panes (visualization, not parallelism — sends already run concurrently): see [`references/parallel-tmux.md`](./references/parallel-tmux.md).
 
 #### [MUST] Reconcile on session-not-found
 
@@ -638,6 +654,7 @@ agent-session spawn \
   --role-id "$r" --state-dir "$SESSIONS_DIR" \
   --system-prompt "$SYS" --prompt-file "$DEBATE_DIR/recover-${r}.md" \
   --initial-round "$N" \
+  --yolo \
   --timeout 1800
 
 # 4. Now send round N's actual discussion prompt.
@@ -646,6 +663,7 @@ agent-session spawn \
 agent-session send \
   --role-id "$r" --state-dir "$SESSIONS_DIR" \
   --prompt-file "$DEBATE_DIR/r${N}.md" \
+  --yolo \
   --timeout 1800
 ```
 
@@ -806,7 +824,8 @@ Re-spawning is expensive (loses the role's full conversation history) and readin
 
    agent-session send --role-id "$r" \
      --prompt-file "$DEBATE_DIR/format-correction-${r}.md" \
-     --state-dir "$SESSIONS_DIR"
+     --state-dir "$SESSIONS_DIR" \
+     --yolo
    ```
 
    `{ROLE_NARROWED_WHITELIST}` / `{ROUND_ALLOWED_STAGES}` are runtime substitutions the
@@ -927,6 +946,7 @@ the moderator brings Compiler online:
        --role-id compiler --state-dir "$SESSIONS_DIR" \
        --system-prompt "$COMPILER_SYS" \
        --prompt-file "$DEBATE_DIR/roles/compiler.md" \
+       --yolo \
        --timeout 900
    fi
    ```
@@ -937,7 +957,7 @@ the moderator brings Compiler online:
 
    ```bash
    agent-session send --role-id compiler --state-dir "$SESSIONS_DIR" \
-     --prompt-file "$DEBATE_DIR/checkpoint-${N}-input.md" --timeout 900
+     --prompt-file "$DEBATE_DIR/checkpoint-${N}-input.md" --yolo --timeout 900
    ```
 
    On second+ checkpoint Compiler's session retains earlier checkpoints, so the
@@ -969,7 +989,7 @@ the moderator brings Compiler online:
    "we recommend", "best option". Send only the corrected reply.
    EOF
      agent-session send --role-id compiler --state-dir "$SESSIONS_DIR" \
-       --prompt-file "$DEBATE_DIR/compiler-correction.md" --timeout 900
+       --prompt-file "$DEBATE_DIR/compiler-correction.md" --yolo --timeout 900
      c_out=$(agent-session output --role-id compiler --state-dir "$SESSIONS_DIR")
    fi
    ```
@@ -1137,34 +1157,39 @@ For **discovery**:
 
 Debate ends by terminating every role session it created (use agent-session's `cleanup` verb per role) and removing its own scratch workspace (`$DEBATE_DIR` from §2.1). Cleanup must be idempotent — repeating it is a no-op; ignore "session not found" errors.
 
-For tmux split mode see [`references/parallel-tmux.md`](./references/parallel-tmux.md) for its analogous cleanup.
-
 ---
 
 ## Red Flags
 
 **绝对不要**：
 
-1. **send fan-out 嵌套 Bash `run_in_background`**：双层 bg 会让 harness 切断
-   wrapper 进程的 stdio/job control，wrapper 在 0% CPU 挂死，子进程从未启动。
-   2026-05-12 debate run 验证：13min 等待，r2-pids.txt 0 字节，无 agent-session
-   子进程被起。**正确做法**：前台 shell 内部 `& wait`，4 并发 send 在 30-60s
-   内返回，符合 Bash tool 默认 120s timeout。
+1. **`agent-session spawn/send/run` 不带 `--yolo`**：opencode backend 会阻塞
+   在交互式权限确认（没有 stdin 来 approve），child 进程在 0% CPU 永久等待，
+   表现为 0 字节 log + role 卡在前一 round_count + debate 整个 stall。
+   claude backend 因为继承 Claude Code 父进程的权限上下文不出问题，所以症状
+   是 opencode-specific 但随机。**正确做法**：所有 spawn/send/run 一律带
+   `--yolo`（debate 是受信任的分析场景，符合 CLAUDE.md 指引）。2026-05-12 和
+   2026-05-14 各有一次 5-role discovery debate 因为这条卡住三轮，前者被错误
+   归因为 "double-bg job control 切断"，2026-05-14 reproduction 证伪了归因。
 
 2. **用 ScheduleWakeup 等 debate 多 role send**：盲等卡死的进程会浪费完整
-   wakeup 周期才发现问题。2026-05-12 debate run 验证：140s wakeup 后回来发现
-   send 早已卡死、永远不会推进，浪费 13min。**正确做法**：foreground `wait`
-   PID（见 §Round N pattern），send 失败/超时立刻可见。
+   wakeup 周期才发现问题。**正确做法**：foreground `wait` PID（见 §Round N
+   pattern），send 失败/超时立刻可见。
 
-3. **任何把 debate orchestration 本身放后台跑**：主 agent 不能用
-   `run_in_background` 包 /debate 调用。debate 是同步流程，所有 spawn/send/
-   checkpoint 都在 main agent 的前台流里。后台化 orchestrator 会复活 #1 的
-   wrapper hang 问题。
-
-4. **`wait` 拼接变量不加分隔**：`wait "$pid$role"` 被 shell 解析为单变量名
+3. **`wait` 拼接变量不加分隔**：`wait "$pid$role"` 被 shell 解析为单变量名
    `$pidrole`，找不到对应 PID 报 `job not found: 65081ole-a`（拼接 PID + role
    name 后丢前导字符）。**正确做法**：`wait "$pid"` —— 每个变量独立 quote，
    永远不在 wait 参数里串变量。如需打日志拼字符串，用其他变量分开处理。
+
+4. **fan-out 跨多个 Bash 调用**：每个 role 单独一个 Bash tool call 调
+   `agent-session send` 会把并发退化成串行，wall-clock 从 max-of-roles 变成
+   sum-of-roles。**正确做法**：单一 Bash call 内部 `& wait`，每个 send
+   重定向到独立 log 文件。
+
+5. **Bash tool 用默认 timeout 跑 send fan-out**：默认 120s 会在 2 分钟时把
+   整个 wait 块 SIGKILL，掩盖真正的进度。**正确做法**：调用 Bash 时显式传
+   `timeout: 600000`。不要用 `run_in_background: true` 来"绕开" timeout —
+   那会破坏 §Round N Send 块要求的前台同步控制流。
 
 ---
 
@@ -1172,7 +1197,6 @@ For tmux split mode see [`references/parallel-tmux.md`](./references/parallel-tm
 
 - **`agent-session` skill** (hard) — backend abstraction; same repo
 - **≥1 backend CLI** — claude / opencode / codex / gemini / etc; ≥2 distinct families recommended
-- **tmux** (optional) — parallel spawn, see [`references/parallel-tmux.md`](./references/parallel-tmux.md)
 
 ## Exception handling
 

@@ -134,10 +134,10 @@ At a checkpoint user says "enough" → conclude → cleanup
 User hits Ctrl+C mid-discussion
 
 **Expected behavior (with skill)**:
-- Input A: emit conclusion → `tmux kill-session` cleans up the background
-- Input B: next /debate auto-cleans the stale tmux session
-- `/tmp/debate/` files are kept for reference
+- Input A: emit conclusion → `agent-session cleanup --role-id "$r"` per active role + `rm -rf $DEBATE_DIR/{logs,tldrs,stances,...}` scratch
+- Input B: next /debate detects existing $DEBATE_DIR sibling state and prompts user before clobbering
+- `/tmp/debate-<id>/` outputs (tldrs-history, stages history) are kept for reference
 
 **Failure behavior**:
-- tmux session lingers and conflicts on next launch
+- agent-session role meta.json files linger and leak across debates
 - No auto-cleanup after a normal end
