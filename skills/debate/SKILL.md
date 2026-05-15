@@ -191,6 +191,7 @@ Path: `~/.config/agents/debate/prefs.json` (XDG, vendor-neutral). Schema:
 {
   "version": 1,
   "lang": null,
+  "claude_backend_mode": "subagent",
   "agents": [
     { "backend": "claude",   "model": null },
     { "backend": "opencode", "model": null }
@@ -202,6 +203,8 @@ Path: `~/.config/agents/debate/prefs.json` (XDG, vendor-neutral). Schema:
 - `lang` (optional, flat): `null` = autodetect (see §2.5.1); explicit ISO-639-1 (`"en"`, `"zh"`, …) pins the language for **role prose**. Section markers (`## TL;DR`, `[stance: …]`, `## Argument`) stay English regardless.
 
 The `lang` field is additive — older `prefs.json` files (no `lang`) keep working.
+
+- `claude_backend_mode` (optional, flat): persistent choice for the claude backend dispatch mode — `"subprocess"` / `"subagent"` / `"teammates"`. `null` or missing = trigger bootstrap (§Bootstrap claude_backend_mode below). The mode applies to every `/debate` run until the user reconfigures it; per-run overrides (`--claude-backend MODE` flag, `DEBATE_CLAUDE_BACKEND` env) take precedence but do NOT write back to prefs. Like `lang`, this field is additive — older `prefs.json` files (no `claude_backend_mode`) trigger one bootstrap dialog on next `/debate`.
 
 **First-run bootstrap (file missing).** Show the doctor output and ask the user *which backends to include* — don't default to "all" silently.
 
@@ -224,6 +227,32 @@ After the user picks, write the file with the chosen subset, each `model: null`.
 Same hybrid prompt rule. The user can also instruct in conversation (*"add codex to my debate pool"*); the agent rewrites the file.
 
 The pool must have ≥1 backend. Single-family pools surface the §2.2 warning.
+
+**Bootstrap `claude_backend_mode` (file exists, field missing).** After pool bootstrap (or when an existing prefs file lacks `claude_backend_mode`), the moderator must elicit the user's persistent choice and write it back:
+
+1. Run `bash skills/debate/lib/detect-claude-backend.sh` to compute a **recommended** mode based on current auth + env. This is now used ONLY here, not on every `/debate` invocation.
+2. Present the three modes with the recommended one highlighted:
+
+   | Runtime | Mechanism |
+   |---|---|
+   | Claude Code (`AskUserQuestion` available) | `AskUserQuestion` with `multiSelect: false`, three options. Put the recommended mode FIRST in the list with `(Recommended)` suffix in its label, so users see it preselected at the top. |
+   | Codex CLI / opencode / other | Plain-text prompt with numbered list (recommended option marked `(Recommended)`); user replies with `1` / `2` / `3`. |
+
+   ```
+   Which claude backend mode for /debate?
+   (You can reconfigure later via /debate --reconfigure-claude-backend
+    or by editing ~/.config/agents/debate/prefs.json.)
+
+     - subagent: Pro/Max subscription friendly — Agent tool dispatch per round
+     - subprocess: agent-session → claude -p (post-2026-06-15 burns Agent SDK credit pool)
+     - teammates: experimental — requires CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+   ```
+
+3. Write back via the helper: `bash skills/debate/lib/bootstrap-claude-backend.sh write ~/.config/agents/debate/prefs.json <chosen>`. Helper validates the mode and aborts on invalid value.
+
+4. If user cancels the dialog or replies with an unparseable value, abort `/debate` with one line and exit before any spawn — the file stays unchanged so the next `/debate` re-prompts.
+
+**Reconfigure mode (`--reconfigure-claude-backend` flag).** When the user passes this flag, the moderator runs `bash skills/debate/lib/bootstrap-claude-backend.sh clear ~/.config/agents/debate/prefs.json` then re-runs the bootstrap flow above. After bootstrap completes, the rest of `/debate` proceeds normally with the freshly chosen mode.
 
 #### 2.3 Per-role assignment algorithm
 
