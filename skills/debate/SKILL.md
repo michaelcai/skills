@@ -61,7 +61,7 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
 
 2. **Live progress visibility**: roles run concurrently via the `& ... wait` loop in §2.5 / §Round N. To watch per-role output in real time, the user can run `tail -F $DEBATE_DIR/logs/send-*.log` in a separate shell. The preflight gate just prints the path so they know where.
 
-3. **claude backend mode autodetect** (only applies when at least one role would use the `claude` backend; opencode/codex are not affected):
+3. **Claude backend mode autodetect** (only applies when at least one role would use the `claude` backend; opencode/codex are not affected):
    ```
    --claude-backend flag → DEBATE_CLAUDE_BACKEND env → claude.ai auth + CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 → claude.ai auth → fallback subprocess
    ```

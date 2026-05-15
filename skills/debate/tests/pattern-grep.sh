@@ -92,7 +92,7 @@ assert_match "Final Compiler synthesis" "Discovery checkpoint trigger must menti
 
 # Claude backend mode adaptation (added 2026-05-15)
 # Skill must enumerate the 3 modes and reference the two new mode files.
-assert_match "claude backend mode" "Preflight gate must announce claude backend mode"
+assert_match "[Cc]laude backend mode" "Preflight gate must announce claude backend mode"
 assert_match "subprocess.*subagent.*teammates|subagent.*teammates.*subprocess" \
     "SKILL.md must enumerate all three claude backend modes"
 assert_match "references/modes/claude-subagent\\.md" "SKILL.md must reference claude-subagent mode file"
