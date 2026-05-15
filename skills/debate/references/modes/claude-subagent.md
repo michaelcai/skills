@@ -8,7 +8,7 @@
 
 ## Per-round dispatch protocol
 
-For each role `r` in `ACTIVE_ROLES`, in **one Bash tool message that assembles all prompts in parallel followed by one assistant message that fires N Agent tool calls in parallel**:
+For each role `r` in `ACTIVE_ROLES`, in **one Bash tool call that assembles all prompts (sequentially is fine — file assembly is fast), then one assistant message that fires N Agent tool calls in parallel**:
 
 ### Step 1 (Bash): Assemble dispatch prompt files
 
@@ -17,9 +17,14 @@ mkdir -p "$DEBATE_DIR/dispatch" "$DEBATE_DIR/outputs"
 for r in "${ACTIVE_ROLES[@]}"; do
   # Round 1: shared-context + role identity + initial focus
   # Round N: shared-context + role identity + accumulated TL;DR history + this-round focus
+  # nullglob: on round 1 there is no tldrs-history/<r>/r*.md — without nullglob the literal
+  #          glob pattern survives, cat fails on a missing file, and `set -e` aborts the loop.
+  shopt -s nullglob
+  history_files=("$DEBATE_DIR/tldrs-history/${r}/"r*.md)
+  shopt -u nullglob
   cat "$DEBATE_DIR/shared-context.md" \
       "$DEBATE_DIR/roles/${r}.md" \
-      "$DEBATE_DIR/tldrs-history/${r}/"r*.md 2>/dev/null \
+      "${history_files[@]}" \
       "$DEBATE_DIR/rN-focus-${r}.md" \
       > "$DEBATE_DIR/dispatch/${r}-r${N}.md"
 done
@@ -34,20 +39,43 @@ Per-call parameters:
 - `description`: `debate <preset> r<N> <role>` (under 8 words)
 - `prompt`: contents of `$DEBATE_DIR/dispatch/<role>-r<N>.md` — must be self-contained, subagent does not inherit moderator context
 
-### Step 3 (Bash): Write returned outputs to debate file layout
+### Step 3 (Write): Write returned outputs to debate file layout
 
-When all subagents return, write their full text to:
-- `$DEBATE_DIR/outputs/<role>-r<N>.md` — full reply (TL;DR + Argument)
-- (The After-round step §SKILL handles stance/stage extraction from these files — unchanged.)
+When each subagent returns, the moderator writes its text content (full TL;DR + Argument reply) to `$DEBATE_DIR/outputs/<role>-r<N>.md` using the **Write tool** (or a `cat > "$DEBATE_DIR/outputs/${r}-r${N}.md" <<'EOF' … EOF` heredoc in a Bash call). The After-round extraction below reads from these files.
+
+Do **not** pre-truncate with a `: > "$DEBATE_DIR/outputs/..."` loop — that leaves zero-byte files if the moderator forgets the write step. The Write tool creates/overwrites in one step.
+
+### Step 4 (Bash): After-round extraction (path-based)
+
+Subagent mode cannot use `agent-session tldr` — that command reads from agent-session's state-dir, not arbitrary paths. Instead, the moderator extracts TL;DR body + stance/stage/source-kind tags directly from `outputs/<role>-r<N>.md` using `sed` + `grep`:
 
 ```bash
-# moderator writes each agent return value into outputs/
+# After-round (subagent mode) — extract TL;DR + tags from outputs/, write to tldrs/ + stances/ + stages/ etc.
 for r in "${ACTIVE_ROLES[@]}"; do
-  : > "$DEBATE_DIR/outputs/${r}-r${N}.md"  # truncate; moderator writes content next
+  out="$DEBATE_DIR/outputs/${r}-r${N}.md"
+  [ -f "$out" ] || { failed+=("$r:no-output"); continue; }
+
+  # TL;DR body: lines between '## TL;DR' and next '## ' header, exclusive
+  sed -n '/^## TL;DR/,/^## /{/^## /!p;}' "$out" > "$DEBATE_DIR/tldrs/${r}.md"
+  mkdir -p "$DEBATE_DIR/tldrs-history/${r}"
+  cp "$DEBATE_DIR/tldrs/${r}.md" "$DEBATE_DIR/tldrs-history/${r}/r${N}.md"
+
+  # Stance: grep '[stance: X]' from TL;DR section, validate against per-role whitelist
+  stance=$(grep -oE '\[stance: *[a-z|/]+ *\]' "$DEBATE_DIR/tldrs/${r}.md" | head -1 | sed -E 's/.*: *//;s/ *\]//')
+  echo "$stance" > "$DEBATE_DIR/stances/${r}.txt"
+  # (Whitelist validation per role uses role_stance_whitelist() from SKILL §After-round; same logic — only the source file changed.)
+
+  # Discovery preset: also extract [stage: ...]
+  stage=$(grep -oE '\[stage: *[a-z]+ *\]' "$out" | head -1 | sed -E 's/.*: *//;s/ *\]//')
+  [ -n "$stage" ] && echo "$stage" > "$DEBATE_DIR/stages/${r}.txt"
+
+  # Inquiry preset: also extract [source-kind: ...]
+  sk=$(grep -oE '\[source-kind: *[a-z\-]+ *\]' "$out" | head -1 | sed -E 's/.*: *//;s/ *\]//')
+  [ -n "$sk" ] && echo "$sk" > "$DEBATE_DIR/source-kinds/${r}-r${N}.txt"
 done
 ```
 
-The moderator writes each subagent's returned text content to its `outputs/` file. The After-round step then runs the same `tldr` / stance / stage extraction shell loops as in subprocess mode, reading from `outputs/` instead of agent-session's state-dir.
+The subprocess mode's `agent-session tldr` calls are replaced by these direct `grep`/`sed` extractions. Downstream files are the same (`tldrs/`, `tldrs-history/`, `stances/`, `stages/`, `source-kinds/`), so the rest of the After-round logic (whitelist validation, false-consensus guard, checkpoint synthesis per SKILL §After-round) is **unchanged**.
 
 ## Reconcile
 
