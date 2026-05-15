@@ -90,6 +90,15 @@ assert_match "compiler-correction.md" "Compiler reject-output path must emit a c
 assert_match "Periodic Compiler checkpoint" "Discovery checkpoint trigger must distinguish periodic vs final"
 assert_match "Final Compiler synthesis" "Discovery checkpoint trigger must mention final-synthesis condition"
 
+# Claude backend mode adaptation (added 2026-05-15)
+# Skill must enumerate the 3 modes and reference the two new mode files.
+assert_match "[Cc]laude backend mode" "Preflight gate must announce claude backend mode"
+assert_match "subprocess.*subagent.*teammates|subagent.*teammates.*subprocess" \
+    "SKILL.md must enumerate all three claude backend modes"
+assert_match "references/modes/claude-subagent\\.md" "SKILL.md must reference claude-subagent mode file"
+assert_match "references/modes/claude-teammates\\.md" "SKILL.md must reference claude-teammates mode file"
+assert_match "detect-claude-backend\\.sh" "SKILL.md must reference the detect script"
+
 echo
 if [[ $fail -gt 0 ]]; then
   echo "FAILED: $fail check(s)"

@@ -61,13 +61,30 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
 
 2. **Live progress visibility**: roles run concurrently via the `& ... wait` loop in §2.5 / §Round N. To watch per-role output in real time, the user can run `tail -F $DEBATE_DIR/logs/send-*.log` in a separate shell. The preflight gate just prints the path so they know where.
 
-3. **Preset detection**:
+3. **Claude backend mode autodetect** (only applies when at least one role would use the `claude` backend; opencode/codex are not affected):
+   ```
+   --claude-backend flag → DEBATE_CLAUDE_BACKEND env → claude.ai auth + CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 → claude.ai auth → fallback subprocess
+   ```
+   Three modes:
+   - `subprocess` — existing agent-session path. **6/15 warning**: post-2026-06-15 this consumes the user's Agent SDK credit pool (Max 5x = $100/mo) rather than subscription quota.
+   - `subagent` — Agent tool dispatch with cumulative-history files. Consumes main session subscription quota. See [`references/modes/claude-subagent.md`](./references/modes/claude-subagent.md).
+   - `teammates` — Anthropic Agent Teams (experimental, requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and Claude Code v2.1.32+). Persistent teammate sessions, SendMessage communication. Compiler is lead-internal. See [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md).
+
+   Run [`lib/detect-claude-backend.sh`](./lib/detect-claude-backend.sh) to compute the recommendation. The script reads auth via `claude auth status` (or a fixture path for tests) and the env vars above. Print the chosen mode + reason in the gate so the user can override.
+
+   **[MUST] Export the detected mode** as `CLAUDE_BACKEND_MODE` so it is visible to later sections (§2.5 Spawn, §Round N Send, §Reconcile, §Compiler, §Cleanup all branch on it):
+   ```bash
+   CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/detect-claude-backend.sh)
+   export CLAUDE_BACKEND_MODE
+   ```
+
+4. **Preset detection**:
    ```
    --preset flag → lib/detect-preset.sh on challenge text → fallback persuasion
    ```
    The auto-detect heuristic matches keywords in the challenge text. If a deliberation indicator matches, recommend `deliberation`; if a discovery indicator matches, recommend `discovery`; if an inquiry indicator matches, recommend `inquiry`; otherwise default to `persuasion`. The preflight gate always displays which preset is active and why.
 
-4. **Budget estimate**:
+5. **Budget estimate**:
    ```
    inter_round   ≈ M_roles × R_planned × 1.7k         (TL;DR piped to disk, moderator doesn't read full Argument)
    checkpoint    ≈ floor(R_planned / 3) × M_roles × 1.5k  (moderator reads full Argument bodies to synthesize)
@@ -81,6 +98,9 @@ Print one combined gate, wait for user:
 ```
 Language: zh (autodetected from challenge text, override with /debate --lang xx)
 Live progress: tail -F $DEBATE_DIR/logs/send-*.log (run in another shell to watch per-role output)
+Claude backend mode: <mode> (<reason>)
+        Override with --claude-backend [subprocess|subagent|teammates].
+        6/15 note: 'subprocess' burns Agent SDK credit (~$100/mo Max 5x); 'subagent' and 'teammates' consume subscription quota.
 Preset: <preset-name> (auto, matched "<keyword>" in challenge / default)
         Override with --preset <other> to force.
 Debate plan: 4 roles × ~6 rounds ≈ ~52k tokens, ~4 min wall-clock
@@ -324,6 +344,13 @@ Debate needs a **persistent multi-turn session per role**, with shared lifetime 
 
 **[MUST] Pass `--timeout 900` at spawn time.** agent-session's default ceiling (1800s) is generous, but `spawn` persists `meta.timeout` for the entire session lifetime — if you don't set it explicitly, sends inherit whatever the env was when spawn ran. Empirically, gpt-5.5-class reasoning models on round-3+ resumes can take 200-400s per turn; 900s gives ~3x headroom. If a specific round still trips it, `send --force --timeout 1500` bumps and retries (see §Round N).
 
+**[MUST] Branch by claude backend mode.** The bash templates below assume `subprocess` mode (claude roles run via `agent-session` → `claude -p`). When `$CLAUDE_BACKEND_MODE` (set in §1.5 preflight) is `subagent` or `teammates`, the moderator does NOT execute these bash templates for the `claude` backend. Instead it follows the mode-specific behavior guide:
+
+- `subagent` → [`references/modes/claude-subagent.md`](./references/modes/claude-subagent.md). Each round dispatches fresh Agent tool subagents with cumulative-history prompt files. Skip the `agent-session` calls below for claude roles.
+- `teammates` → [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md). Round 1 spawns an Anthropic agent team; rounds N>1 use SendMessage. Skip the `agent-session` calls below for claude roles.
+
+Non-claude backends (opencode, codex, gemini, etc.) ALWAYS go through `agent-session` regardless of `$CLAUDE_BACKEND_MODE`. A mixed debate (e.g. claude + opencode roles) runs claude roles via Agent tool / SendMessage and opencode roles via `agent-session spawn` in the same round.
+
 **[MUST] Pass `--yolo` on every `agent-session spawn` / `send` / `run` call.** Without it, opencode backend blocks on its interactive permission prompt (no stdin to approve), and the role's child process sits at 0% CPU forever — manifests as 0-byte log files, role stuck at the prior round_count, and the entire debate stalls until manually killed. claude backend inherits permission context from the Claude Code parent and so does not exhibit the symptom — the failure is opencode-specific but unpredictable per round. Debate is a trusted analysis context (CLAUDE.md guidance), so `--yolo` is correct here; the agent-session binary translates it to `--dangerously-skip-permissions` for opencode and the equivalent for other backends. **Confirmed 2026-05-14**: a 5-role discovery debate stalled three rounds in a row at exactly the 3 opencode roles before the missing flag was identified.
 
 ```bash
@@ -526,6 +553,13 @@ The focus bullets are the **only** content from this round that the moderator ty
 
 ##### Send (parallel)
 
+**[MUST] Branch by claude backend mode** (set in §1.5 preflight):
+- `subagent` → for each `claude`-backed role, dispatch a fresh Agent tool call (one assistant message, all N tool_use blocks in parallel) per [`references/modes/claude-subagent.md`](./references/modes/claude-subagent.md). Skip `agent-session send` for those roles.
+- `teammates` → for each `claude`-backed role, issue SendMessage to that role's teammate (one assistant message, all N SendMessage calls in parallel) per [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md). Skip `agent-session send`.
+- `subprocess` → use the bash template below (existing path).
+
+Non-claude roles (opencode/codex/etc.) ALWAYS use the `agent-session send` template below regardless of mode. In mixed debates, the moderator runs both paths in parallel within one assistant turn (Agent/SendMessage calls + Bash tool block for agent-session sends).
+
 Pass the same `rN.md` to every role via agent-session's `send` verb,
 dispatched in parallel.
 
@@ -622,6 +656,11 @@ done
 If you want Defender to rebut this-round critic arguments, do it as an **optional follow-up half-round** (one extra `send` to Defender after collecting the others' r_N), not by ordering the main round. Reserve for the round just before a checkpoint.
 
 #### [MUST] Reconcile on session-not-found
+
+**Mode applicability**:
+- `subprocess` — full reconcile flow below applies (the original agent-session path).
+- `subagent` — **NOT applicable**. Every round is a fresh Agent tool dispatch; there is no persistent session to lose. If a subagent call fails, re-dispatch the same role with the same prompt. No `--initial-round` accounting needed.
+- `teammates` — replace-instead-of-resume. Anthropic's `/resume` and `/rewind` do not restore in-process teammates. If a teammate becomes unresponsive, the moderator shuts it down (`Ask <teammate-name> to shut down`) and spawns a replacement with full role history as the spawn prompt. See [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md) §Reconcile.
 
 If any `agent-session send` returns **exit 3** during round N, the backend
 reports the role's session has been GC'd (most commonly: claude CLI's
@@ -758,6 +797,8 @@ For **discovery**:
 Text similarity is unreliable. Same TL;DR + different stance tags = strongest false-consensus warning. A `null` stance amid otherwise-valid stances does **not** count as "Mostly X" — it must be resolved first.
 
 ##### Format-correction escalation (for `null` stance)
+
+**Mode-aware dispatch**: In `subagent` mode the correction send is another Agent tool call (per [`references/modes/claude-subagent.md`](./references/modes/claude-subagent.md) §Format correction). In `teammates` mode it is a SendMessage to the affected role's teammate (per [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md) §Format correction). In `subprocess` mode it is the `agent-session send` shown below. The correction prompt template content (what gets sent) is identical across modes.
 
 Re-spawning is expensive (loses the role's full conversation history) and reading past the issue is dishonest. Add a cheap intermediate step:
 
@@ -931,6 +972,10 @@ For **inquiry**:
 
 ##### Compiler activation (Discovery only)
 
+**Mode applicability**:
+- `subprocess` and `subagent` — Compiler runs as a dedicated session/dispatch per the spawn/send template below. In `subagent` mode the Compiler spawn becomes a regular Agent tool dispatch (one extra subagent dedicated to the Compiler role) — the prompt content below is unchanged.
+- `teammates` — Compiler is **lead-internal** (the moderator does the Compiler work in-context, not as a teammate). Anthropic does not support nested teams, so a Compiler teammate cannot spawn its own analysis context. The moderator reads `tldrs/*.md` + `stages/*.txt` itself and produces the four sections (Framing Matrix / Missing Axes / Irreducible Divergences / Open Questions). All forbidden-pattern grep guards still apply. See [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md) §Checkpoint.
+
 Compiler does not participate per-round (it is not in `ACTIVE_ROLES`). At each
 checkpoint trigger — periodic (every 3 rounds) or final (all stages `settle`) —
 the moderator brings Compiler online:
@@ -972,7 +1017,7 @@ the moderator brings Compiler online:
 
    ```bash
    c_out=$(agent-session output --role-id compiler --state-dir "$SESSIONS_DIR")
-   if echo "$c_out" | grep -qE '^## Recommendation|^## Best Option|^## Ranking|we recommend|best option|ranking from best'; then
+   if echo "$c_out" | grep -qiE '^## Recommendations?|^## Best Options?|^## Ranking|we recommend|best option|ranking from best'; then
      cat > "$DEBATE_DIR/compiler-correction.md" <<'EOF'
    Your previous reply contained forbidden sections (Recommendation / Best Option /
    Ranking) or phrasing (we recommend / best option / ranking from best). Compiler's
@@ -1155,7 +1200,12 @@ For **discovery**:
 
 [MUST] Runs automatically — don't wait for the user.
 
-Debate ends by terminating every role session it created (use agent-session's `cleanup` verb per role) and removing its own scratch workspace (`$DEBATE_DIR` from §2.1). Cleanup must be idempotent — repeating it is a no-op; ignore "session not found" errors.
+**Mode-aware**:
+- `subprocess` — `agent-session cleanup --role-id "$r"` for every active role + `rm -rf $DEBATE_DIR`. Idempotent; ignore "session not found".
+- `subagent` — no per-role cleanup (subagents are one-shot, already terminated). Just `rm -rf $DEBATE_DIR`.
+- `teammates` — moderator emits `Clean up the team` (Anthropic runtime tears down teammates + team config). Then `rm -rf $DEBATE_DIR`. Anthropic doc: *"Always use the lead to clean up. Teammates should not run cleanup."*
+
+Cleanup must be idempotent — repeating it is a no-op; ignore "session not found" errors. Non-claude roles always go through `agent-session cleanup` regardless of mode.
 
 ---
 

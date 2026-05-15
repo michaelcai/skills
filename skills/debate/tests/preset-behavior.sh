@@ -193,8 +193,9 @@ assert_eq "$got" "1" "Discovery R2+ stage violator emits 'bad-stage-r\${N}'"
 got=$(grep -c '"\$r:bad-source-kind' "$SKILL_FILE")
 assert_eq "$got" "1" "Inquiry bad-source-kind validator emits 'bad-source-kind'"
 
-# Compiler runtime guard against Recommendation/Best Option/Ranking
-got=$(grep -cE '\^## Recommendation\|\^## Best Option\|\^## Ranking' "$SKILL_FILE")
+# Compiler runtime guard against Recommendation(s)/Best Option(s)/Ranking
+# Case-insensitive grep (-qiE) catches drift like "## recommendation" or "## RANKING"; s? matches plural forms.
+got=$(grep -cE '\^## Recommendations\?\|\^## Best Options\?\|\^## Ranking' "$SKILL_FILE")
 [ "$got" -ge 1 ] && got=1 || got=0
 assert_eq "$got" "1" "Compiler output validator greps for forbidden sections (Recommendation/Best Option/Ranking)"
 
