@@ -344,6 +344,13 @@ Debate needs a **persistent multi-turn session per role**, with shared lifetime 
 
 **[MUST] Pass `--timeout 900` at spawn time.** agent-session's default ceiling (1800s) is generous, but `spawn` persists `meta.timeout` for the entire session lifetime — if you don't set it explicitly, sends inherit whatever the env was when spawn ran. Empirically, gpt-5.5-class reasoning models on round-3+ resumes can take 200-400s per turn; 900s gives ~3x headroom. If a specific round still trips it, `send --force --timeout 1500` bumps and retries (see §Round N).
 
+**[MUST] Branch by claude backend mode.** The bash templates below assume `subprocess` mode (claude roles run via `agent-session` → `claude -p`). When `$CLAUDE_BACKEND_MODE` (set in §1.5 preflight) is `subagent` or `teammates`, the moderator does NOT execute these bash templates for the `claude` backend. Instead it follows the mode-specific behavior guide:
+
+- `subagent` → [`references/modes/claude-subagent.md`](./references/modes/claude-subagent.md). Each round dispatches fresh Agent tool subagents with cumulative-history prompt files. Skip the `agent-session` calls below for claude roles.
+- `teammates` → [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md). Round 1 spawns an Anthropic agent team; rounds N>1 use SendMessage. Skip the `agent-session` calls below for claude roles.
+
+Non-claude backends (opencode, codex, gemini, etc.) ALWAYS go through `agent-session` regardless of `$CLAUDE_BACKEND_MODE`. A mixed debate (e.g. claude + opencode roles) runs claude roles via Agent tool / SendMessage and opencode roles via `agent-session spawn` in the same round.
+
 **[MUST] Pass `--yolo` on every `agent-session spawn` / `send` / `run` call.** Without it, opencode backend blocks on its interactive permission prompt (no stdin to approve), and the role's child process sits at 0% CPU forever — manifests as 0-byte log files, role stuck at the prior round_count, and the entire debate stalls until manually killed. claude backend inherits permission context from the Claude Code parent and so does not exhibit the symptom — the failure is opencode-specific but unpredictable per round. Debate is a trusted analysis context (CLAUDE.md guidance), so `--yolo` is correct here; the agent-session binary translates it to `--dangerously-skip-permissions` for opencode and the equivalent for other backends. **Confirmed 2026-05-14**: a 5-role discovery debate stalled three rounds in a row at exactly the 3 opencode roles before the missing flag was identified.
 
 ```bash
