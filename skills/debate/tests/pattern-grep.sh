@@ -99,6 +99,13 @@ assert_match "references/modes/claude-subagent\\.md" "SKILL.md must reference cl
 assert_match "references/modes/claude-teammates\\.md" "SKILL.md must reference claude-teammates mode file"
 assert_match "detect-claude-backend\\.sh" "SKILL.md must reference the detect script"
 
+# Claude backend mode persistence (added 2026-05-15)
+# Prefs-first resolution; bootstrap dialog on missing field; reconfigure flag.
+assert_match "claude_backend_mode" "SKILL.md must reference the prefs.json field name"
+assert_match "bootstrap-claude-backend\\.sh" "SKILL.md must reference the bootstrap helper"
+assert_match -- "--reconfigure-claude-backend" "SKILL.md must document the reconfigure flag"
+assert_match "Bootstrap .claude_backend_mode." "§2.2.5 must contain a Bootstrap claude_backend_mode subsection"
+
 echo
 if [[ $fail -gt 0 ]]; then
   echo "FAILED: $fail check(s)"

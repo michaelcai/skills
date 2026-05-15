@@ -11,6 +11,9 @@ echo
 echo "=== UNIT (claude-backend) ==="
 bash "$SD/unit-claude-backend.sh" || rc=1
 echo
+echo "=== UNIT (bootstrap-claude-backend) ==="
+bash "$SD/unit-bootstrap-claude-backend.sh" || rc=1
+echo
 echo "=== PATTERN GREP ==="
 bash "$SD/pattern-grep.sh" || rc=1
 echo
