@@ -282,7 +282,8 @@ The pool must have ≥1 backend. Single-family pools surface the §2.2 warning.
    | Runtime | Mechanism |
    |---|---|
    | Claude Code (`AskUserQuestion` available) | `AskUserQuestion` with `multiSelect: false`, three options. Put the recommended mode FIRST in the list with `(Recommended)` suffix in its label, so users see it preselected at the top. |
-   | Codex CLI / opencode / other | Plain-text prompt with numbered list (recommended option marked `(Recommended)`); user replies with `1` / `2` / `3`. |
+   | Codex CLI / opencode / other interactive runtime | Plain-text prompt with numbered list (recommended option marked `(Recommended)`); user replies with `1` / `2` / `3`. |
+   | **Auto mode / non-interactive** (Claude Code `--auto`, any pipeline / CI run where the user cannot answer a prompt) | **No dialog possible — fallback to detect recommendation, write back without asking.** Use `detect-claude-backend.sh`'s output as the chosen mode, run `bootstrap-claude-backend.sh write <prefs> <recommended>`, and echo to stderr: `Auto mode: bootstrapped claude_backend_mode=<recommended> from detect. Run /debate --reconfigure-claude-backend in an interactive session to change.` This persists the choice so subsequent runs are deterministic. **Do NOT ad-hoc set `DEBATE_CLAUDE_BACKEND` env without writing prefs** — that creates state visible only inside one debate run and leaves prefs unconfigured for next time. |
 
    ```
    Which claude backend mode for /debate?
@@ -296,7 +297,7 @@ The pool must have ≥1 backend. Single-family pools surface the §2.2 warning.
 
 3. Write back via the helper: `bash skills/debate/lib/bootstrap-claude-backend.sh write ~/.config/agents/debate/prefs.json <chosen>`. Helper validates the mode and aborts on invalid value. If `write` exits non-zero (e.g., user picked an invalid value somehow, jq failure, prefs got malformed mid-dialog), abort `/debate` with a clear message and do not proceed to spawn.
 
-4. If user cancels the dialog or replies with an unparseable value, abort `/debate` with one line and exit before any spawn — the file stays unchanged so the next `/debate` re-prompts.
+4. If user cancels the dialog or replies with an unparseable value (interactive runtimes only), abort `/debate` with one line and exit before any spawn — the file stays unchanged so the next `/debate` re-prompts. Auto mode has no cancel path; if `detect-claude-backend.sh` itself fails (e.g., `claude auth status` malformed), abort with the stderr from the detect script.
 
 **Reconfigure mode (`--reconfigure-claude-backend` flag).** When the user passes this flag, the moderator runs `bash skills/debate/lib/bootstrap-claude-backend.sh clear ~/.config/agents/debate/prefs.json` then re-runs the bootstrap flow above. After bootstrap completes, the rest of `/debate` proceeds normally with the freshly chosen mode.
 
