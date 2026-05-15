@@ -76,15 +76,22 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
    - `--reconfigure-claude-backend` → trigger §2.2.5 reconfigure flow (clear + re-bootstrap) before continuing
    - `--claude-backend MODE` → set `DEBATE_CLAUDE_BACKEND_FLAG=MODE` for this run only
 
-   **[MUST] Resolve and export `CLAUDE_BACKEND_MODE`**:
+   **[MUST] Resolve and export `CLAUDE_BACKEND_MODE`**. Semantics: `--reconfigure-claude-backend` is handled FIRST and ALWAYS re-runs the §2.2.5 bootstrap dialog (clearing then writing a fresh persisted value). THEN the override chain (flag/env) applies for this run only. Net effect: prefs persists the bootstrap choice; the current invocation may use a different mode if an override is set; future runs use prefs.
+
    ```bash
-   # 1. Parse --reconfigure-claude-backend (handled in §2.2.5 reconfigure flow if present)
+   # 1. Handle --reconfigure-claude-backend FIRST: always re-bootstraps prefs.
+   #    This step ALWAYS produces a new persisted mode value, even when
+   #    --claude-backend MODE is also passed for this run.
    if echo "$USER_ARGS" | grep -q -- '--reconfigure-claude-backend'; then
-     bash skills/debate/lib/bootstrap-claude-backend.sh clear ~/.config/agents/debate/prefs.json
-     # Then run §2.2.5 bootstrap flow (moderator invokes AskUserQuestion, writes back)
+     bash skills/debate/lib/bootstrap-claude-backend.sh clear ~/.config/agents/debate/prefs.json || {
+       echo "bootstrap-claude-backend.sh clear failed; aborting" >&2; exit 1; }
+     # Moderator now invokes the §2.2.5 bootstrap dialog (AskUserQuestion / plain text)
+     # and writes the chosen mode via:
+     #   bash skills/debate/lib/bootstrap-claude-backend.sh write <path> <chosen>
+     # After this step, prefs.json has a fresh claude_backend_mode.
    fi
 
-   # 2. Parse --claude-backend MODE
+   # 2. Parse --claude-backend MODE (override for this run only; never writes back)
    if echo "$USER_ARGS" | grep -qE -- '--claude-backend +[a-z]+'; then
      DEBATE_CLAUDE_BACKEND_FLAG=$(echo "$USER_ARGS" \
        | grep -oE -- '--claude-backend +[a-z]+' \
@@ -100,11 +107,17 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
      CLAUDE_BACKEND_MODE="$DEBATE_CLAUDE_BACKEND"
      MODE_REASON="DEBATE_CLAUDE_BACKEND env"
    else
-     CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/bootstrap-claude-backend.sh read ~/.config/agents/debate/prefs.json)
+     if ! CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/bootstrap-claude-backend.sh read ~/.config/agents/debate/prefs.json); then
+       echo "Failed to read prefs.json (malformed?); aborting" >&2
+       exit 1
+     fi
      if [ -z "$CLAUDE_BACKEND_MODE" ]; then
        # Trigger §2.2.5 bootstrap flow (moderator invokes AskUserQuestion, writes back)
-       # After bootstrap, re-read:
-       CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/bootstrap-claude-backend.sh read ~/.config/agents/debate/prefs.json)
+       # After bootstrap, re-read (also abort on read failure):
+       if ! CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/bootstrap-claude-backend.sh read ~/.config/agents/debate/prefs.json); then
+         echo "Failed to read prefs.json after bootstrap; aborting" >&2
+         exit 1
+       fi
        MODE_REASON="just bootstrapped"
      else
        MODE_REASON="from prefs"
@@ -125,6 +138,8 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
    - **Session env**: `export DEBATE_CLAUDE_BACKEND=subprocess` before launching Claude Code, or `env` block in `settings.json`
    - **Persistent change**: `/debate "..." --reconfigure-claude-backend` (or edit `~/.config/agents/debate/prefs.json` manually). Bootstrap dialog will re-fire.
    - **Teammates prerequisite**: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` must be set BEFORE Claude Code launches (the env gates an internal tool surface). Restart Claude Code with the env set, then `--reconfigure-claude-backend` to pick teammates.
+
+   **Combining `--reconfigure-claude-backend` with `--claude-backend MODE`**: both work together. Reconfigure always re-runs the bootstrap dialog and persists the user's chosen mode; the `--claude-backend MODE` flag then takes precedence for this run only. So a user can simultaneously change their persistent default AND use a different mode for this run.
 
 4. **Preset detection**:
    ```
@@ -279,7 +294,7 @@ The pool must have ≥1 backend. Single-family pools surface the §2.2 warning.
      - teammates: experimental — requires CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
    ```
 
-3. Write back via the helper: `bash skills/debate/lib/bootstrap-claude-backend.sh write ~/.config/agents/debate/prefs.json <chosen>`. Helper validates the mode and aborts on invalid value.
+3. Write back via the helper: `bash skills/debate/lib/bootstrap-claude-backend.sh write ~/.config/agents/debate/prefs.json <chosen>`. Helper validates the mode and aborts on invalid value. If `write` exits non-zero (e.g., user picked an invalid value somehow, jq failure, prefs got malformed mid-dialog), abort `/debate` with a clear message and do not proceed to spawn.
 
 4. If user cancels the dialog or replies with an unparseable value, abort `/debate` with one line and exit before any spawn — the file stays unchanged so the next `/debate` re-prompts.
 
