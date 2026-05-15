@@ -8,13 +8,15 @@
 
 ## Per-round dispatch protocol
 
-For each role `r` in `ACTIVE_ROLES`, in **one Bash tool call that assembles all prompts (sequentially is fine — file assembly is fast), then one assistant message that fires N Agent tool calls in parallel**:
+The moderator partitions `ACTIVE_ROLES` into two arrays based on the role's resolved backend (from §2.3 Per-role assignment): `CLAUDE_ROLES` (those using the claude backend) and `AGENT_SESSION_ROLES` (everything else — opencode/codex/etc., routed through agent-session unchanged). This mode reference only describes the `CLAUDE_ROLES` path; agent-session handling for the others is unchanged from SKILL.md §Send.
+
+For each role `r` in `CLAUDE_ROLES`, in **one Bash tool call that assembles all prompts (sequentially is fine — file assembly is fast), then one assistant message that fires N Agent tool calls in parallel**:
 
 ### Step 1 (Bash): Assemble dispatch prompt files
 
 ```bash
 mkdir -p "$DEBATE_DIR/dispatch" "$DEBATE_DIR/outputs"
-for r in "${ACTIVE_ROLES[@]}"; do
+for r in "${CLAUDE_ROLES[@]}"; do
   # Round 1: shared-context + role identity + initial focus
   # Round N: shared-context + role identity + accumulated TL;DR history + this-round focus
   # nullglob: on round 1 there is no tldrs-history/<r>/r*.md — without nullglob the literal
@@ -47,11 +49,12 @@ Do **not** pre-truncate with a `: > "$DEBATE_DIR/outputs/..."` loop — that lea
 
 ### Step 4 (Bash): After-round extraction (path-based)
 
-Subagent mode cannot use `agent-session tldr` — that command reads from agent-session's state-dir, not arbitrary paths. Instead, the moderator extracts TL;DR body + stance/stage/source-kind tags directly from `outputs/<role>-r<N>.md` using `sed` + `grep`:
+Subagent mode cannot use `agent-session tldr` — that command reads from agent-session's state-dir, not arbitrary paths. Instead, the moderator extracts TL;DR body + stance/stage/source-kind tags directly from `outputs/<role>-r<N>.md` using `sed` + `grep`. The `role_stance_whitelist` function is owned by SKILL.md §After-round — this loop just calls it.
 
 ```bash
 # After-round (subagent mode) — extract TL;DR + tags from outputs/, write to tldrs/ + stances/ + stages/ etc.
-for r in "${ACTIVE_ROLES[@]}"; do
+mkdir -p "$DEBATE_DIR/tldrs" "$DEBATE_DIR/stances" "$DEBATE_DIR/stages" "$DEBATE_DIR/source-kinds"
+for r in "${CLAUDE_ROLES[@]}"; do
   out="$DEBATE_DIR/outputs/${r}-r${N}.md"
   [ -f "$out" ] || { failed+=("$r:no-output"); continue; }
 
@@ -60,18 +63,25 @@ for r in "${ACTIVE_ROLES[@]}"; do
   mkdir -p "$DEBATE_DIR/tldrs-history/${r}"
   cp "$DEBATE_DIR/tldrs/${r}.md" "$DEBATE_DIR/tldrs-history/${r}/r${N}.md"
 
-  # Stance: grep '[stance: X]' from TL;DR section, validate against per-role whitelist
-  stance=$(grep -oE '\[stance: *[a-z|/]+ *\]' "$DEBATE_DIR/tldrs/${r}.md" | head -1 | sed -E 's/.*: *//;s/ *\]//')
-  echo "$stance" > "$DEBATE_DIR/stances/${r}.txt"
-  # (Whitelist validation per role uses role_stance_whitelist() from SKILL §After-round; same logic — only the source file changed.)
+  # Stance: grep '[stance: X]' from TL;DR section, validate against per-role narrowed whitelist
+  # (role_stance_whitelist owned by SKILL.md §After-round — do not redefine here).
+  # Invalid / out-of-mutex / missing stance → null, which trips §False-consensus guard.
+  stance_raw=$(grep -oE '\[stance: *[a-z|/]+ *\]' "$DEBATE_DIR/tldrs/${r}.md" | head -1 | sed -E 's/.*: *//;s/ *\]//')
+  narrowed=$(role_stance_whitelist "$PRESET" "$r")
+  if [ -z "$stance_raw" ] || ! echo ",$narrowed," | grep -q ",$stance_raw,"; then
+    echo "null" > "$DEBATE_DIR/stances/${r}.txt"
+  else
+    echo "$stance_raw" > "$DEBATE_DIR/stances/${r}.txt"
+  fi
 
   # Discovery preset: also extract [stage: ...]
   stage=$(grep -oE '\[stage: *[a-z]+ *\]' "$out" | head -1 | sed -E 's/.*: *//;s/ *\]//')
   [ -n "$stage" ] && echo "$stage" > "$DEBATE_DIR/stages/${r}.txt"
 
   # Inquiry preset: also extract [source-kind: ...]
+  # Single-file per role (matches subprocess mode; overwrites each round — used for Inquiry checkpoint logic).
   sk=$(grep -oE '\[source-kind: *[a-z\-]+ *\]' "$out" | head -1 | sed -E 's/.*: *//;s/ *\]//')
-  [ -n "$sk" ] && echo "$sk" > "$DEBATE_DIR/source-kinds/${r}-r${N}.txt"
+  [ -n "$sk" ] && echo "$sk" > "$DEBATE_DIR/source-kinds/${r}.txt"
 done
 ```
 
@@ -86,8 +96,16 @@ The subprocess mode's `agent-session tldr` calls are replaced by these direct `g
 Same flow as subprocess mode but the correction send is another Agent tool dispatch:
 1. After-round detects null stance / out-of-mutex stance / bad stage
 2. Moderator builds `format-correction-<role>.md` (preset-aware, per SKILL §Format-correction template)
-3. **Dispatch a fresh Agent** with `prompt` = original dispatch + correction appended
-4. Write returned text back to `outputs/<role>-r<N>.md`, re-run extraction
+3. **Dispatch a fresh Agent** with `prompt` = original dispatch + the previous (invalid) `outputs/<role>-r<N>.md` content + correction template. The subagent has no session memory; the previous bad output and the correction template are both required for the model to know what to fix. Example assembly:
+   ```bash
+   cat "$DEBATE_DIR/dispatch/${r}-r${N}.md" \
+       <(echo) <(echo "## Your previous reply (must be corrected):") \
+       "$DEBATE_DIR/outputs/${r}-r${N}.md" \
+       <(echo) <(echo "## Correction") \
+       "$DEBATE_DIR/format-correction-${r}.md" \
+       > "$DEBATE_DIR/dispatch/${r}-r${N}-correction.md"
+   ```
+4. Dispatch Agent tool with this assembled prompt, write returned text back to `outputs/<role>-r<N>.md`, re-run extraction.
 
 ## Cleanup
 
