@@ -72,11 +72,29 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
 
    Run [`lib/detect-claude-backend.sh`](./lib/detect-claude-backend.sh) to compute the recommendation. The script reads auth via `claude auth status` (or a fixture path for tests) and the env vars above. Print the chosen mode + reason in the gate so the user can override.
 
+   **[MUST] Parse `--claude-backend MODE` from the user's `/debate` args** before invoking the detect script. The flag, if present, becomes the highest-priority signal — translate it into `DEBATE_CLAUDE_BACKEND_FLAG` env so the detect script picks it up. Reject unknown MODE values (detect script's `validate_mode` already does this; surface its stderr to the user and abort).
+
    **[MUST] Export the detected mode** as `CLAUDE_BACKEND_MODE` so it is visible to later sections (§2.5 Spawn, §Round N Send, §Reconcile, §Compiler, §Cleanup all branch on it):
    ```bash
-   CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/detect-claude-backend.sh)
+   # Extract --claude-backend MODE from $USER_ARGS (the raw /debate argument string)
+   if echo "$USER_ARGS" | grep -qE -- '--claude-backend +[a-z]+'; then
+     DEBATE_CLAUDE_BACKEND_FLAG=$(echo "$USER_ARGS" \
+       | grep -oE -- '--claude-backend +[a-z]+' \
+       | awk '{print $2}')
+     export DEBATE_CLAUDE_BACKEND_FLAG
+   fi
+
+   CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/detect-claude-backend.sh) || {
+     echo "Mode detection failed; aborting debate" >&2
+     exit 1
+   }
    export CLAUDE_BACKEND_MODE
    ```
+
+   **User-facing override paths** (all three end up at the same `DEBATE_CLAUDE_BACKEND_FLAG` / env / autodetect chain):
+   - **Per-invocation flag** (preferred): `/debate "..." --claude-backend subprocess`
+   - **Session-wide env** (for scripting / non-interactive runs): set `DEBATE_CLAUDE_BACKEND=subprocess` in Claude Code's `settings.json` `env` block, or `export DEBATE_CLAUDE_BACKEND=subprocess` before launching Claude Code
+   - **Teammates mode requires extra setup**: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` must be set **before** Claude Code launches (the env gates an internal tool surface). Restart Claude Code with the env set, then either let autodetect pick `teammates` (Pro/Max auth) or pass `--claude-backend teammates` to be explicit.
 
 4. **Preset detection**:
    ```
