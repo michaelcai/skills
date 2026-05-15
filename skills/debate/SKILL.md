@@ -657,6 +657,11 @@ If you want Defender to rebut this-round critic arguments, do it as an **optiona
 
 #### [MUST] Reconcile on session-not-found
 
+**Mode applicability**:
+- `subprocess` — full reconcile flow below applies (the original agent-session path).
+- `subagent` — **NOT applicable**. Every round is a fresh Agent tool dispatch; there is no persistent session to lose. If a subagent call fails, re-dispatch the same role with the same prompt. No `--initial-round` accounting needed.
+- `teammates` — replace-instead-of-resume. Anthropic's `/resume` and `/rewind` do not restore in-process teammates. If a teammate becomes unresponsive, the moderator shuts it down (`Ask <teammate-name> to shut down`) and spawns a replacement with full role history as the spawn prompt. See [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md) §Reconcile.
+
 If any `agent-session send` returns **exit 3** during round N, the backend
 reports the role's session has been GC'd (most commonly: claude CLI's
 session TTL, observed to expire by ~22min idle in 2026-05-12 testing).
@@ -967,6 +972,10 @@ For **inquiry**:
 
 ##### Compiler activation (Discovery only)
 
+**Mode applicability**:
+- `subprocess` and `subagent` — Compiler runs as a dedicated session/dispatch per the spawn/send template below. In `subagent` mode the Compiler spawn becomes a regular Agent tool dispatch (one extra subagent dedicated to the Compiler role) — the prompt content below is unchanged.
+- `teammates` — Compiler is **lead-internal** (the moderator does the Compiler work in-context, not as a teammate). Anthropic does not support nested teams, so a Compiler teammate cannot spawn its own analysis context. The moderator reads `tldrs/*.md` + `stages/*.txt` itself and produces the four sections (Framing Matrix / Missing Axes / Irreducible Divergences / Open Questions). All forbidden-pattern grep guards still apply. See [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md) §Checkpoint.
+
 Compiler does not participate per-round (it is not in `ACTIVE_ROLES`). At each
 checkpoint trigger — periodic (every 3 rounds) or final (all stages `settle`) —
 the moderator brings Compiler online:
@@ -1191,7 +1200,12 @@ For **discovery**:
 
 [MUST] Runs automatically — don't wait for the user.
 
-Debate ends by terminating every role session it created (use agent-session's `cleanup` verb per role) and removing its own scratch workspace (`$DEBATE_DIR` from §2.1). Cleanup must be idempotent — repeating it is a no-op; ignore "session not found" errors.
+**Mode-aware**:
+- `subprocess` — `agent-session cleanup --role-id "$r"` for every active role + `rm -rf $DEBATE_DIR`. Idempotent; ignore "session not found".
+- `subagent` — no per-role cleanup (subagents are one-shot, already terminated). Just `rm -rf $DEBATE_DIR`.
+- `teammates` — moderator emits `Clean up the team` (Anthropic runtime tears down teammates + team config). Then `rm -rf $DEBATE_DIR`. Anthropic doc: *"Always use the lead to clean up. Teammates should not run cleanup."*
+
+Cleanup must be idempotent — repeating it is a no-op; ignore "session not found" errors. Non-claude roles always go through `agent-session cleanup` regardless of mode.
 
 ---
 
