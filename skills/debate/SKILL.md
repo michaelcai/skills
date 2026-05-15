@@ -61,22 +61,30 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
 
 2. **Live progress visibility**: roles run concurrently via the `& ... wait` loop in §2.5 / §Round N. To watch per-role output in real time, the user can run `tail -F $DEBATE_DIR/logs/send-*.log` in a separate shell. The preflight gate just prints the path so they know where.
 
-3. **Claude backend mode autodetect** (only applies when at least one role would use the `claude` backend; opencode/codex are not affected):
+3. **Claude backend mode** (only applies when at least one role uses the `claude` backend; opencode/codex are not affected):
    ```
-   --claude-backend flag → DEBATE_CLAUDE_BACKEND env → claude.ai auth + CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 → claude.ai auth → fallback subprocess
+   --claude-backend flag → DEBATE_CLAUDE_BACKEND env → prefs.json claude_backend_mode → bootstrap dialog
    ```
    Three modes:
-   - `subprocess` — existing agent-session path. **6/15 warning**: post-2026-06-15 this consumes the user's Agent SDK credit pool (Max 5x = $100/mo) rather than subscription quota.
+   - `subprocess` — existing agent-session path. Post-2026-06-15 this consumes the user's Agent SDK credit pool (Max 5x = $100/mo) rather than subscription quota.
    - `subagent` — Agent tool dispatch with cumulative-history files. Consumes main session subscription quota. See [`references/modes/claude-subagent.md`](./references/modes/claude-subagent.md).
    - `teammates` — Anthropic Agent Teams (experimental, requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and Claude Code v2.1.32+). Persistent teammate sessions, SendMessage communication. Compiler is lead-internal. See [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md).
 
-   Run [`lib/detect-claude-backend.sh`](./lib/detect-claude-backend.sh) to compute the recommendation. The script reads auth via `claude auth status` (or a fixture path for tests) and the env vars above. Print the chosen mode + reason in the gate so the user can override.
+   **Resolution (no autodetect on normal runs).** The mode comes from `prefs.json` (configured once during bootstrap, §2.2.5). Per-invocation overrides take precedence but do NOT write back. `detect-claude-backend.sh` is only called from the bootstrap dialog, never per-run.
 
-   **[MUST] Parse `--claude-backend MODE` from the user's `/debate` args** before invoking the detect script. The flag, if present, becomes the highest-priority signal — translate it into `DEBATE_CLAUDE_BACKEND_FLAG` env so the detect script picks it up. Reject unknown MODE values (detect script's `validate_mode` already does this; surface its stderr to the user and abort).
+   **[MUST] Parse user-facing flags from `$USER_ARGS`** before reading prefs:
+   - `--reconfigure-claude-backend` → trigger §2.2.5 reconfigure flow (clear + re-bootstrap) before continuing
+   - `--claude-backend MODE` → set `DEBATE_CLAUDE_BACKEND_FLAG=MODE` for this run only
 
-   **[MUST] Export the detected mode** as `CLAUDE_BACKEND_MODE` so it is visible to later sections (§2.5 Spawn, §Round N Send, §Reconcile, §Compiler, §Cleanup all branch on it):
+   **[MUST] Resolve and export `CLAUDE_BACKEND_MODE`**:
    ```bash
-   # Extract --claude-backend MODE from $USER_ARGS (the raw /debate argument string)
+   # 1. Parse --reconfigure-claude-backend (handled in §2.2.5 reconfigure flow if present)
+   if echo "$USER_ARGS" | grep -q -- '--reconfigure-claude-backend'; then
+     bash skills/debate/lib/bootstrap-claude-backend.sh clear ~/.config/agents/debate/prefs.json
+     # Then run §2.2.5 bootstrap flow (moderator invokes AskUserQuestion, writes back)
+   fi
+
+   # 2. Parse --claude-backend MODE
    if echo "$USER_ARGS" | grep -qE -- '--claude-backend +[a-z]+'; then
      DEBATE_CLAUDE_BACKEND_FLAG=$(echo "$USER_ARGS" \
        | grep -oE -- '--claude-backend +[a-z]+' \
@@ -84,17 +92,39 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
      export DEBATE_CLAUDE_BACKEND_FLAG
    fi
 
-   CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/detect-claude-backend.sh) || {
-     echo "Mode detection failed; aborting debate" >&2
-     exit 1
-   }
+   # 3. Resolve mode (priority: flag → env → prefs → trigger bootstrap)
+   if [ -n "${DEBATE_CLAUDE_BACKEND_FLAG:-}" ]; then
+     CLAUDE_BACKEND_MODE="$DEBATE_CLAUDE_BACKEND_FLAG"
+     MODE_REASON="--claude-backend override"
+   elif [ -n "${DEBATE_CLAUDE_BACKEND:-}" ]; then
+     CLAUDE_BACKEND_MODE="$DEBATE_CLAUDE_BACKEND"
+     MODE_REASON="DEBATE_CLAUDE_BACKEND env"
+   else
+     CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/bootstrap-claude-backend.sh read ~/.config/agents/debate/prefs.json)
+     if [ -z "$CLAUDE_BACKEND_MODE" ]; then
+       # Trigger §2.2.5 bootstrap flow (moderator invokes AskUserQuestion, writes back)
+       # After bootstrap, re-read:
+       CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/bootstrap-claude-backend.sh read ~/.config/agents/debate/prefs.json)
+       MODE_REASON="just bootstrapped"
+     else
+       MODE_REASON="from prefs"
+     fi
+   fi
+
+   # 4. Validate
+   case "$CLAUDE_BACKEND_MODE" in
+     subprocess|subagent|teammates) ;;
+     *) echo "Invalid claude_backend_mode: '$CLAUDE_BACKEND_MODE' (expected subprocess|subagent|teammates)" >&2
+        exit 1 ;;
+   esac
    export CLAUDE_BACKEND_MODE
    ```
 
-   **User-facing override paths** (all three end up at the same `DEBATE_CLAUDE_BACKEND_FLAG` / env / autodetect chain):
-   - **Per-invocation flag** (preferred): `/debate "..." --claude-backend subprocess`
-   - **Session-wide env** (for scripting / non-interactive runs): set `DEBATE_CLAUDE_BACKEND=subprocess` in Claude Code's `settings.json` `env` block, or `export DEBATE_CLAUDE_BACKEND=subprocess` before launching Claude Code
-   - **Teammates mode requires extra setup**: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` must be set **before** Claude Code launches (the env gates an internal tool surface). Restart Claude Code with the env set, then either let autodetect pick `teammates` (Pro/Max auth) or pass `--claude-backend teammates` to be explicit.
+   **User-facing override paths** (all read-only, never write back to prefs):
+   - **Per-invocation flag**: `/debate "..." --claude-backend subprocess`
+   - **Session env**: `export DEBATE_CLAUDE_BACKEND=subprocess` before launching Claude Code, or `env` block in `settings.json`
+   - **Persistent change**: `/debate "..." --reconfigure-claude-backend` (or edit `~/.config/agents/debate/prefs.json` manually). Bootstrap dialog will re-fire.
+   - **Teammates prerequisite**: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` must be set BEFORE Claude Code launches (the env gates an internal tool surface). Restart Claude Code with the env set, then `--reconfigure-claude-backend` to pick teammates.
 
 4. **Preset detection**:
    ```
@@ -117,7 +147,8 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
 Language: zh (autodetected from challenge text, override with /debate --lang xx)
 Live progress: tail -F $DEBATE_DIR/logs/send-*.log (run in another shell to watch per-role output)
 Claude backend mode: <mode> (<reason>)
-        Override with --claude-backend [subprocess|subagent|teammates].
+        Override this run with --claude-backend [subprocess|subagent|teammates].
+        Reconfigure persistent choice with /debate --reconfigure-claude-backend.
 Preset: <preset-name> (auto, matched "<keyword>" in challenge / default)
         Override with --preset <other> to force.
 Debate plan: 4 roles × ~6 rounds ≈ ~52k tokens, ~4 min wall-clock
