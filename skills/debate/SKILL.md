@@ -61,13 +61,30 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
 
 2. **Live progress visibility**: roles run concurrently via the `& ... wait` loop in §2.5 / §Round N. To watch per-role output in real time, the user can run `tail -F $DEBATE_DIR/logs/send-*.log` in a separate shell. The preflight gate just prints the path so they know where.
 
-3. **Preset detection**:
+3. **claude backend mode autodetect** (only applies when at least one role would use the `claude` backend; opencode/codex are not affected):
+   ```
+   --claude-backend flag → DEBATE_CLAUDE_BACKEND env → claude.ai auth + CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 → claude.ai auth → fallback subprocess
+   ```
+   Three modes:
+   - `subprocess` — existing agent-session path. **6/15 warning**: post-2026-06-15 this consumes the user's Agent SDK credit pool (Max 5x = $100/mo) rather than subscription quota.
+   - `subagent` — Agent tool dispatch with cumulative-history files. Consumes main session subscription quota. See [`references/modes/claude-subagent.md`](./references/modes/claude-subagent.md).
+   - `teammates` — Anthropic Agent Teams (experimental, requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and Claude Code v2.1.32+). Persistent teammate sessions, SendMessage communication. Compiler is lead-internal. See [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md).
+
+   Run [`lib/detect-claude-backend.sh`](./lib/detect-claude-backend.sh) to compute the recommendation. The script reads auth via `claude auth status` (or a fixture path for tests) and the env vars above. Print the chosen mode + reason in the gate so the user can override.
+
+   **[MUST] Export the detected mode** as `CLAUDE_BACKEND_MODE` so it is visible to later sections (§2.5 Spawn, §Round N Send, §Reconcile, §Compiler, §Cleanup all branch on it):
+   ```bash
+   CLAUDE_BACKEND_MODE=$(bash skills/debate/lib/detect-claude-backend.sh)
+   export CLAUDE_BACKEND_MODE
+   ```
+
+4. **Preset detection**:
    ```
    --preset flag → lib/detect-preset.sh on challenge text → fallback persuasion
    ```
    The auto-detect heuristic matches keywords in the challenge text. If a deliberation indicator matches, recommend `deliberation`; if a discovery indicator matches, recommend `discovery`; if an inquiry indicator matches, recommend `inquiry`; otherwise default to `persuasion`. The preflight gate always displays which preset is active and why.
 
-4. **Budget estimate**:
+5. **Budget estimate**:
    ```
    inter_round   ≈ M_roles × R_planned × 1.7k         (TL;DR piped to disk, moderator doesn't read full Argument)
    checkpoint    ≈ floor(R_planned / 3) × M_roles × 1.5k  (moderator reads full Argument bodies to synthesize)
@@ -81,6 +98,9 @@ Print one combined gate, wait for user:
 ```
 Language: zh (autodetected from challenge text, override with /debate --lang xx)
 Live progress: tail -F $DEBATE_DIR/logs/send-*.log (run in another shell to watch per-role output)
+Claude backend mode: <mode> (<reason>)
+        Override with --claude-backend [subprocess|subagent|teammates].
+        6/15 note: 'subprocess' burns Agent SDK credit (~$100/mo Max 5x); 'subagent' and 'teammates' consume subscription quota.
 Preset: <preset-name> (auto, matched "<keyword>" in challenge / default)
         Override with --preset <other> to force.
 Debate plan: 4 roles × ~6 rounds ≈ ~52k tokens, ~4 min wall-clock
