@@ -43,6 +43,20 @@ assert_eq "$out" "subprocess" "DEBATE_CLAUDE_BACKEND env wins over autodetect"
 out=$(DEBATE_CLAUDE_BACKEND_FLAG=teammates DEBATE_CLAUDE_BACKEND=subprocess bash "$LIB" "$FX/auth-no-login.json")
 assert_eq "$out" "teammates" "--claude-backend flag wins even over env"
 
+# Scenario 7: invalid env override value rejected with non-zero exit
+out=$(DEBATE_CLAUDE_BACKEND=bogus bash "$LIB" "$FX/auth-pro-no-teams.json" 2>&1)
+rc=$?
+assert_eq "$rc" "1" "invalid env value rejected with non-zero exit"
+
+# Scenario 8: invalid flag value rejected with non-zero exit
+out=$(DEBATE_CLAUDE_BACKEND_FLAG=typo bash "$LIB" "$FX/auth-no-login.json" 2>&1)
+rc=$?
+assert_eq "$rc" "1" "invalid flag value rejected with non-zero exit"
+
+# Scenario 9: claude.ai login but no subscriptionType → subprocess (conservative)
+out=$(unset CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS DEBATE_CLAUDE_BACKEND; bash "$LIB" "$FX/auth-claudeai-no-sub.json")
+assert_eq "$out" "subprocess" "claude.ai login without subscriptionType → subprocess (conservative)"
+
 echo
 echo "================================================"
 echo "Result: $PASS passed, $FAIL failed"
