@@ -46,6 +46,30 @@ modules:
       - { kind: contains,  value: "NOT scoped" }
       - { kind: forbidden, value: "## Your examination angle" }
 
+  # Claude backend mode references — gated by detect-claude-backend.sh
+  - id: mode-claude-subagent
+    path: references/modes/claude-subagent.md
+    loaded_by: moderator-optional
+    purpose: "Agent tool dispatch mode — subscription-friendly, post-6/15"
+    invariants:
+      - { kind: contains, value: "Agent tool dispatch" }
+      - { kind: contains, value: "subscription quota" }
+      - { kind: forbidden, value: "agent-session spawn" }
+      # this mode does not invoke agent-session for claude backend
+
+  - id: mode-claude-teammates
+    path: references/modes/claude-teammates.md
+    loaded_by: moderator-optional
+    purpose: "Anthropic Agent Teams (experimental) — persistent multi-turn, lead-internal Compiler"
+    invariants:
+      - { kind: contains, value: "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" }
+      - { kind: contains, value: "SendMessage" }
+      - { kind: contains, value: "Compiler (Discovery only) is lead-internal" }
+      - { kind: forbidden, value: "spawn Compiler teammate" }
+      # Compiler in teammates mode is NEVER a teammate (no nested teams + user decision).
+      # Forbidden phrase = positive-instruction form; the negation "does NOT spawn a
+      # Compiler teammate" contains "a" and so does not trip this substring check.
+
   # Deliberation-preset modules
   - id: role-stakeholder
     path: references/roles/stakeholder.md
