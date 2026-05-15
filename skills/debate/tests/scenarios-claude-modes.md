@@ -152,20 +152,24 @@ mv /tmp/p.json ~/.config/agents/debate/prefs.json
 - Debate runs in subprocess mode
 - After the run, `cat ~/.config/agents/debate/prefs.json | jq .claude_backend_mode` → `"subagent"` (UNCHANGED)
 
-## Scenario P4: Reconfigure flag clears + re-bootstraps
+## Scenario P4: Natural-language re-bootstrap, exits without debate
 
 **Setup**: prefs.json has `claude_backend_mode: "subagent"`.
 
 **Run**:
 ```
-/debate "..." --reconfigure-claude-backend
+/debate "reconfigure my mode"
 ```
+or any phrasing the moderator can semantically classify as a re-bootstrap intent rather than a debate topic.
 
 **Expected**:
-- §1.5 step 3 detects the flag, calls `bootstrap-claude-backend.sh clear`
-- prefs.json field is now removed
+- Moderator judges intent: re-bootstrap (not debate topic)
+- Calls `bootstrap-claude-backend.sh clear` → prefs.json field removed
 - §2.2.5 bootstrap flow fires (AskUserQuestion or plain text)
-- User can pick a different mode, e.g., `teammates` (assuming the env is set; otherwise the validation will fail downstream at first SendMessage call)
+- User picks a different mode, e.g., `teammates`
+- `bootstrap-claude-backend.sh write <prefs> teammates` writes the field
+- Moderator prints `Mode reconfigured. Run /debate "your topic" to start.` to stderr
+- **Exits before any debate spawn** — no `agent-session spawn` / Agent tool dispatch
 - After the run, `cat ~/.config/agents/debate/prefs.json | jq .claude_backend_mode` → the newly chosen mode
 
 ## Scenario P5: Manual edit (legacy / power user)
@@ -196,4 +200,4 @@ mv /tmp/p.json ~/.config/agents/debate/prefs.json
 /debate "..."
 ```
 
-**Expected**: §1.5 step 3 validation catches the bogus value and aborts with `Invalid claude_backend_mode: 'bogus' (expected subprocess|subagent|teammates)`. User must manually fix prefs.json or run `--reconfigure-claude-backend`.
+**Expected**: §1.5 step 3 validation catches the bogus value and aborts with `Invalid claude_backend_mode: 'bogus' (expected subprocess|subagent|teammates)`. User must manually fix prefs.json or trigger a re-bootstrap via natural language (e.g. `/debate "reconfigure my mode"`).
