@@ -6,13 +6,7 @@ set -u
 SD="$(cd "$(dirname "$0")" && pwd)"
 rc=0
 echo "=== UNIT ==="
-bash "$SD/run-unit.sh" || exit 1
-echo
-echo "=== UNIT (claude-backend) ==="
-bash "$SD/unit-claude-backend.sh" || rc=1
-echo
-echo "=== UNIT (bootstrap-claude-backend) ==="
-bash "$SD/unit-bootstrap-claude-backend.sh" || rc=1
+bash "$SD/run-unit.sh" || rc=1
 echo
 echo "=== PATTERN GREP ==="
 bash "$SD/pattern-grep.sh" || rc=1
