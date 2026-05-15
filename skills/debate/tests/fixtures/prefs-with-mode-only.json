@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "claude_backend_mode": "teammates",
+  "agents": [
+    { "backend": "claude", "model": null }
+  ]
+}
