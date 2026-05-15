@@ -40,14 +40,16 @@ case "$cmd" in
     [ -z "$path" ] || [ -z "$mode" ] && { echo "usage: $0 write <prefs-path> <mode>" >&2; exit 1; }
     [ -f "$path" ] || { echo "bootstrap-claude-backend.sh: prefs file not found at $path (run pool bootstrap first)" >&2; exit 1; }
     validate_mode "$mode" || exit 1
-    tmp=$(mktemp)
+    dir=$(dirname "$path")
+    tmp=$(mktemp "$dir/.prefs.XXXXXX")
     jq --arg m "$mode" '.claude_backend_mode = $m' "$path" > "$tmp" || { rm -f "$tmp"; echo "bootstrap-claude-backend.sh: jq write failed" >&2; exit 2; }
     mv "$tmp" "$path"
     ;;
   clear)
     [ -z "$path" ] && { echo "usage: $0 clear <prefs-path>" >&2; exit 1; }
     [ -f "$path" ] || exit 0
-    tmp=$(mktemp)
+    dir=$(dirname "$path")
+    tmp=$(mktemp "$dir/.prefs.XXXXXX")
     jq 'del(.claude_backend_mode)' "$path" > "$tmp" || { rm -f "$tmp"; echo "bootstrap-claude-backend.sh: jq clear failed" >&2; exit 2; }
     mv "$tmp" "$path"
     ;;

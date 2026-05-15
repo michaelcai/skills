@@ -75,6 +75,18 @@ out=$(bash "$LIB" write "$TMP/does-not-exist.json" subagent 2>&1)
 rc=$?
 assert_eq "$rc" "1" "write on missing file fails (pool bootstrap must create prefs.json first)"
 
+# 12. read on malformed JSON → exit 2, empty stdout
+cp "$FX/prefs-malformed.json" "$TMP/malformed.json" 2>/dev/null || \
+  printf '{ "version": 1, this is not valid json\n' > "$TMP/malformed.json"
+out=$(bash "$LIB" read "$TMP/malformed.json" 2>&1 >/dev/null)
+rc=$?
+assert_eq "$rc" "2" "read on malformed JSON exits 2"
+
+# 13. write on malformed JSON → exit 2 (jq fails to parse)
+out=$(bash "$LIB" write "$TMP/malformed.json" subagent 2>&1)
+rc=$?
+assert_eq "$rc" "2" "write on malformed JSON exits 2"
+
 echo
 echo "================================================"
 echo "Result: $PASS passed, $FAIL failed"
