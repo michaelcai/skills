@@ -1017,7 +1017,7 @@ the moderator brings Compiler online:
 
    ```bash
    c_out=$(agent-session output --role-id compiler --state-dir "$SESSIONS_DIR")
-   if echo "$c_out" | grep -qE '^## Recommendation|^## Best Option|^## Ranking|we recommend|best option|ranking from best'; then
+   if echo "$c_out" | grep -qiE '^## Recommendations?|^## Best Options?|^## Ranking|we recommend|best option|ranking from best'; then
      cat > "$DEBATE_DIR/compiler-correction.md" <<'EOF'
    Your previous reply contained forbidden sections (Recommendation / Best Option /
    Ranking) or phrasing (we recommend / best option / ranking from best). Compiler's

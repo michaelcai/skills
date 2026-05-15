@@ -57,7 +57,9 @@ Anthropic runtime auto-assigns names to teammates; the moderator MUST capture th
 
 ## Round N (N >= 1, including round 1 if team is already up): Send
 
-For each role's teammate, send via SendMessage:
+The moderator partitions `ACTIVE_ROLES` into two arrays based on the role's resolved backend (from §2.3 Per-role assignment): `CLAUDE_ROLES` (teammates) and `AGENT_SESSION_ROLES` (everything else — opencode/codex/etc., routed through agent-session unchanged). This mode reference describes only the `CLAUDE_ROLES` (SendMessage) path; agent-session handling for the others is unchanged from SKILL.md §Send.
+
+For each role's teammate (in `CLAUDE_ROLES`), send via SendMessage:
 
 ```
 SendMessage(to: "<teammate-name>", message: <round-N focus prompt>)
@@ -81,7 +83,21 @@ When Discovery preset reaches a checkpoint (every 3 rounds or all stages = `sett
 1. Moderator reads `$DEBATE_DIR/tldrs/*.md` + `$DEBATE_DIR/stages/*.txt`
 2. Moderator synthesizes Framing Matrix / Missing Axes / Irreducible Divergences / Open Questions itself (in the main session context)
 3. Moderator writes result to `$DEBATE_DIR/compiler-output-${N}.md`
-4. Same grep guards apply (no "## Recommendation" / "## Best Option" / "## Ranking" allowed)
+4. Same grep guards apply (no "## Recommendation(s)" / "## Best Option(s)" / "## Ranking" allowed)
+
+Executable validation snippet (lead-internal — no Send/Agent dispatch):
+
+```bash
+# Lead-internal Compiler validation (teammates mode)
+c_out=$(cat "$DEBATE_DIR/compiler-output-${N}.md")
+if echo "$c_out" | grep -qiE '^## Recommendations?|^## Best Options?|^## Ranking|we recommend|best option|ranking from best'; then
+  # Moderator must rewrite compiler-output-${N}.md without forbidden sections.
+  # Re-read tldrs + stages, regenerate the 4 sections, overwrite the file.
+  # This is a moderator-internal correction loop — no Send/Agent dispatch needed.
+  echo "Compiler output failed forbidden-pattern check; moderator must regenerate" >&2
+  # (Caller re-runs the synthesis step above)
+fi
+```
 
 **Why**: Anthropic's "no nested teams" limitation — teammates can't spawn their own teammates. The moderator (lead) is the only place a Compiler-equivalent can run. Trade-off: loses cross-family Compiler model diversity, but simplifies and avoids "one team at a time per lead" lockout.
 
