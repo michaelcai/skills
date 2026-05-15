@@ -111,14 +111,13 @@ After context confirmation, before any `agent-session spawn`, the moderator runs
    ```
    For M=4, R=6: ~40k inter + ~12k checkpoint ≈ **~52k tokens**. Don't paper over the checkpoint cost — early test runs underestimated by ~30% by ignoring it.
 
-Print one combined gate, wait for user:
+**[MUST] Print one combined gate AND WAIT for the user's explicit reply** before any `agent-session spawn` / Agent tool dispatch / SendMessage / file creation under `$DEBATE_DIR`. Accept these replies: `Y`/`y`/`yes`/`begin`/`go` to proceed; `n`/`no`/`cancel` to abort; `self-critique` to enter critique mode. **Do NOT** start the debate while waiting — emitting the gate and the first `mkdir -p $DEBATE_DIR` in the same turn is a violation. Re-prompt once on unclear replies; abort on second unclear.
 
 ```
 Language: zh (autodetected from challenge text, override with /debate --lang xx)
 Live progress: tail -F $DEBATE_DIR/logs/send-*.log (run in another shell to watch per-role output)
 Claude backend mode: <mode> (<reason>)
         Override with --claude-backend [subprocess|subagent|teammates].
-        6/15 note: 'subprocess' burns Agent SDK credit (~$100/mo Max 5x); 'subagent' and 'teammates' consume subscription quota.
 Preset: <preset-name> (auto, matched "<keyword>" in challenge / default)
         Override with --preset <other> to force.
 Debate plan: 4 roles × ~6 rounds ≈ ~52k tokens, ~4 min wall-clock
