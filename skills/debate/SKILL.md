@@ -553,6 +553,13 @@ The focus bullets are the **only** content from this round that the moderator ty
 
 ##### Send (parallel)
 
+**[MUST] Branch by claude backend mode** (set in §1.5 preflight):
+- `subagent` → for each `claude`-backed role, dispatch a fresh Agent tool call (one assistant message, all N tool_use blocks in parallel) per [`references/modes/claude-subagent.md`](./references/modes/claude-subagent.md). Skip `agent-session send` for those roles.
+- `teammates` → for each `claude`-backed role, issue SendMessage to that role's teammate (one assistant message, all N SendMessage calls in parallel) per [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md). Skip `agent-session send`.
+- `subprocess` → use the bash template below (existing path).
+
+Non-claude roles (opencode/codex/etc.) ALWAYS use the `agent-session send` template below regardless of mode. In mixed debates, the moderator runs both paths in parallel within one assistant turn (Agent/SendMessage calls + Bash tool block for agent-session sends).
+
 Pass the same `rN.md` to every role via agent-session's `send` verb,
 dispatched in parallel.
 
@@ -785,6 +792,8 @@ For **discovery**:
 Text similarity is unreliable. Same TL;DR + different stance tags = strongest false-consensus warning. A `null` stance amid otherwise-valid stances does **not** count as "Mostly X" — it must be resolved first.
 
 ##### Format-correction escalation (for `null` stance)
+
+**Mode-aware dispatch**: In `subagent` mode the correction send is another Agent tool call (per [`references/modes/claude-subagent.md`](./references/modes/claude-subagent.md) §Format correction). In `teammates` mode it is a SendMessage to the affected role's teammate (per [`references/modes/claude-teammates.md`](./references/modes/claude-teammates.md) §Format correction). In `subprocess` mode it is the `agent-session send` shown below. The correction prompt template content (what gets sent) is identical across modes.
 
 Re-spawning is expensive (loses the role's full conversation history) and reading past the issue is dishonest. Add a cheap intermediate step:
 
