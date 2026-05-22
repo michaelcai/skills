@@ -129,7 +129,7 @@ Creates a new session and runs the first turn.
 |---|---|---|
 | `--backend` | yes | One of the names from `list-backends` |
 | `--role-id` | yes | Any string unique within `$AGENT_SESSION_DIR`. Caller chooses. |
-| `--prompt-file` | yes | Path to first-turn prompt (markdown / plain text) |
+| `--prompt-file` | yes | Path to first-turn prompt (markdown / plain text). Single file only — to combine multiple sources, `cat` them into one file first. |
 | `--model` | no | Backend-specific model name; driver picks default if omitted |
 | `--state-dir` | no | Override `$AGENT_SESSION_DIR`; e.g. debate passes `$DEBATE_DIR/sessions/` |
 | `--system-prompt` | no | System-level instructions; passed to backend if it supports it |

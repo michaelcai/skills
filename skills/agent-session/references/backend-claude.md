@@ -57,6 +57,12 @@ alias claude='claude --model sonnet'
 
 If `claude` is not on `PATH`, the driver fails detection — install it system-wide or symlink.
 
+## Tool access
+
+The driver passes `--tools ""` on all invocations (spawn, send, run), disabling all built-in tools (Read, Edit, Bash, etc.). This ensures claude sessions managed by agent-session produce text-only responses without side effects like file system access or code execution.
+
+If a future use case requires tool access in claude sessions, the driver would need a new flag to opt in.
+
 ## Permission behavior
 
 `agent-session --yolo` maps to `claude --dangerously-skip-permissions`.

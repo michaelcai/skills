@@ -202,7 +202,7 @@ Tokens: ~Xk used / ~52k planned (estimate)
 #### 2.1 Workspace
 
 ```bash
-DEBATE_ID=$(date +%s%N | md5sum | head -c4)
+DEBATE_ID=$(printf '%s%s' "$(date +%s)" "$$" | md5 | head -c6)
 DEBATE_DIR="/tmp/debate-${DEBATE_ID}"
 SESSIONS_DIR="${DEBATE_DIR}/sessions"
 TLDRS_HISTORY="${DEBATE_DIR}/tldrs-history"  # per-role accumulated TL;DRs for reconcile
@@ -573,7 +573,7 @@ if [ "$PRESET" = "discovery" ]; then
   mkdir -p "$DEBATE_DIR/stages"
   for r in "${ACTIVE_ROLES[@]}"; do
     out=$(agent-session output --role-id "$r" --state-dir "$SESSIONS_DIR" 2>/dev/null)
-    stage=$(echo "$out" | grep -oE '\[stage:[[:space:]]*[a-z]+\]' | head -1 | grep -oE '[a-z]+' | tail -1)
+    stage=$(echo "$out" | grep -oE '\[stage:[[:space:]]*[a-z]+\]' | head -1 | sed 's/.*: *//;s/\]//')
     echo "${stage:-null}" > "$DEBATE_DIR/stages/$r.txt"
   done
 fi

@@ -274,7 +274,7 @@ class ClaudeDriver(Driver):
         r0_in = sd / "input" / "r0.md"
         shutil.copy(prompt_file, r0_in)
 
-        cmd = ["claude", "-p", "--session-id", sid]
+        cmd = ["claude", "-p", "--session-id", sid, "--tools", ""]
         if model:
             cmd += ["--model", model]
         if system_prompt:
@@ -332,7 +332,7 @@ class ClaudeDriver(Driver):
         shutil.copy(prompt_file, rN_in)
         t = resolve_timeout(override=timeout, meta_timeout=meta.get("timeout"))
 
-        cmd = ["claude", "-p", "--resume", meta["sid"]]
+        cmd = ["claude", "-p", "--resume", meta["sid"], "--tools", ""]
         if meta.get("model") and meta["model"] != "default":
             cmd += ["--model", meta["model"]]
         if meta.get("yolo", False):
@@ -394,7 +394,7 @@ class ClaudeDriver(Driver):
 
     def run(self, prompt_file, model, system_prompt, cwd, yolo, timeout):
         t = resolve_timeout(override=timeout)
-        cmd = ["claude", "-p"]
+        cmd = ["claude", "-p", "--tools", ""]
         if model:
             cmd += ["--model", model]
         if system_prompt:
@@ -724,10 +724,12 @@ class CodexDriver(Driver):
                "--output-last-message", str(r0_out.resolve())]
         if model:
             cmd += ["-m", model]
+        # codex exec expects prompt as positional argument, not stdin.
+        cmd.append(prompt_content)
 
         try:
             result = subprocess.run(
-                cmd, input=prompt_content, capture_output=True, text=True, timeout=t,
+                cmd, capture_output=True, text=True, timeout=t,
             )
         except subprocess.TimeoutExpired:
             append_log(role_id, state_dir, f"spawn timeout after {t}s")
@@ -774,10 +776,12 @@ class CodexDriver(Driver):
                "--output-last-message", str(rN_out.resolve())]
         if meta.get("model") and meta["model"] != "default":
             cmd += ["-m", meta["model"]]
+        # codex exec resume expects prompt as positional argument, not stdin.
+        cmd.append(prompt_content)
 
         try:
             result = subprocess.run(
-                cmd, input=prompt_content, capture_output=True, text=True,
+                cmd, capture_output=True, text=True,
                 cwd=str(cwd), timeout=t,
             )
         except subprocess.TimeoutExpired:
@@ -1023,6 +1027,7 @@ def cmd_spawn(args) -> int:
             args.timeout,
             args.initial_round,
         )
+    print(f"spawned {args.role_id} (backend={args.backend})")
     return 0
 
 
@@ -1084,6 +1089,9 @@ def cmd_send(args) -> int:
                 meta["timeout"] = args.timeout
                 write_meta(args.role_id, args.state_dir, meta)
         drv.send(args.role_id, args.prompt_file, args.state_dir, args.timeout)
+    meta = read_meta(args.role_id, args.state_dir)
+    rc = meta.get("round_count", "?") if meta else "?"
+    print(f"sent {args.role_id} (round={rc})")
     return 0
 
 

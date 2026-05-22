@@ -26,10 +26,11 @@ extract_tldr() {
   sed -n '/^## TL;DR/,/^## /p' "$1" | sed '$d'
 }
 
-# DEBATE_ID: 4 char hex. SKILL.md uses `head -c4` (no trailing newline);
+# DEBATE_ID: 6 char hex. SKILL.md uses `head -c6` (no trailing newline);
 # tests need a newline-terminated variant for line-based dedup.
+# macOS has no md5sum (use md5) and no %N in date; use PID for entropy.
 gen_id() {
-  date +%s%N | md5sum | head -c4
+  printf '%s%s' "$(date +%s)" "$$" | md5 | head -c6
 }
 gen_id_line() {
   gen_id; echo
@@ -174,19 +175,19 @@ test_tldr_includes_stance_when_present() {
 # DEBATE_ID generation
 # -------------------------------------------------------------------
 
-test_id_4chars_hex() {
+test_id_6chars_hex() {
   local id
   id=$(gen_id)
-  [ ${#id} -eq 4 ] || { echo "  expected 4 chars, got ${#id}: $id"; return 1; }
-  [[ "$id" =~ ^[0-9a-f]{4}$ ]] || { echo "  not lowercase hex: $id"; return 1; }
+  [ ${#id} -eq 6 ] || { echo "  expected 6 chars, got ${#id}: $id"; return 1; }
+  [[ "$id" =~ ^[0-9a-f]{6}$ ]] || { echo "  not lowercase hex: $id"; return 1; }
 }
 
 test_id_unique_across_invocations() {
-  # Two consecutive calls should usually differ (md5 of nanosecond timestamps).
-  # Take 5 samples; expect at least 4 distinct (allow 1 collision for very fast clocks).
+  # Two consecutive calls should usually differ (md5 of second-timestamp + PID).
+  # Take 5 samples via subshells (each gets a distinct PID); expect at least 4 distinct.
   local distinct
-  distinct=$( (gen_id_line; gen_id_line; gen_id_line; gen_id_line; gen_id_line) | sort -u | wc -l | tr -d ' ')
-  [ "$distinct" -ge 4 ] || { echo "  only $distinct/5 distinct IDs — clock too coarse?"; return 1; }
+  distinct=$( (bash -c "$(declare -f gen_id); gen_id; echo"; bash -c "$(declare -f gen_id); gen_id; echo"; bash -c "$(declare -f gen_id); gen_id; echo"; bash -c "$(declare -f gen_id); gen_id; echo"; bash -c "$(declare -f gen_id); gen_id; echo") | sort -u | wc -l | tr -d ' ')
+  [ "$distinct" -ge 4 ] || { echo "  only $distinct/5 distinct IDs — entropy too low?"; return 1; }
 }
 
 # -------------------------------------------------------------------
