@@ -287,6 +287,12 @@ assert_contains "$last_err" "timeout after 1s at round 1" "send --force moved ol
 to_val=$(python3 -c "import json;print(json.load(open('$SEND_DIR/stuck/meta.json'))['timeout'])")
 assert_eq "$to_val" "1" "send --timeout persists value back to meta"
 
+# Case: send does NOT accept --yolo (permission inherited from spawn via meta.json)
+out=$("$AS" send --role-id stuck --prompt-file "$TMPDIR_BASE/p.md" --state-dir "$SEND_DIR" --yolo 2>&1)
+rc=$?
+assert_rc $rc 2 "send --yolo exits 2 (unrecognized argument)"
+assert_contains "$out" "unrecognized arguments: --yolo" "send --yolo reports unrecognized"
+
 echo ""
 echo "=== spawn duplicate without --force ==="
 
