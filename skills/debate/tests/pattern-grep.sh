@@ -53,8 +53,8 @@ assert_match "session-not-found" "§Reconcile must reference session-not-found"
 assert_match "initial-round" "§Reconcile must reference --initial-round"
 # 2026-05-14 root-cause: opencode without --yolo hangs at 0% CPU.
 # Red Flag #1 must call this out, and §2.5 must MUST it.
-assert_match "不带 .--yolo." "§Red Flags must list 'agent-session spawn/send/run 不带 --yolo' (current root cause)"
-assert_match "opencode backend blocks on its interactive permission prompt" "§2.5 MUST must explain opencode-yolo failure mode"
+assert_match "不带 .--yolo." "§Red Flags must list 'agent-session spawn/run 不带 --yolo' (current root cause)"
+assert_match "非交互子进程会阻塞" "§Red Flags must explain why --yolo is needed (non-interactive subprocess blocks)"
 assert_match "ScheduleWakeup 等" "§Red Flags must list 'ScheduleWakeup 等 ...'"
 assert_match "fan-out 跨多个 Bash" "§Red Flags must warn against multi-Bash-call fan-out"
 assert_match "Bash tool 用默认 timeout" "§Red Flags must warn against using default Bash timeout"

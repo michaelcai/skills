@@ -430,7 +430,7 @@ Debate needs a **persistent multi-turn session per role**, with shared lifetime 
 
 **[MUST] Before each spawn, save the assembled per-role identity prompt** (shared context + role template from §2.4) to `$DEBATE_DIR/roles/${r}.md`. This file is the reconcile anchor — if the role's session is lost mid-debate, §Reconcile re-uses it to rebuild context without re-reading the original source files.
 
-**[MUST] Pass `--timeout 900` at spawn time.** agent-session's default ceiling (1800s) is generous, but `spawn` persists `meta.timeout` for the entire session lifetime — if you don't set it explicitly, sends inherit whatever the env was when spawn ran. Empirically, gpt-5.5-class reasoning models on round-3+ resumes can take 200-400s per turn; 900s gives ~3x headroom. If a specific round still trips it, `send --force --timeout 1500` bumps and retries (see §Round N).
+**[MUST] Pass `--timeout 900` at spawn time.** Reasoning models can take 200-400s per turn; 900s gives headroom. If a round times out, retry with `send --force --timeout 1500`.
 
 **[MUST] Branch by claude backend mode.** The bash templates below assume `subprocess` mode (claude roles run via `agent-session` → `claude -p`). When `$CLAUDE_BACKEND_MODE` (set in §1.5 preflight) is `subagent` or `teammates`, the moderator does NOT execute these bash templates for the `claude` backend. Instead it follows the mode-specific behavior guide:
 
@@ -439,7 +439,7 @@ Debate needs a **persistent multi-turn session per role**, with shared lifetime 
 
 Non-claude backends (opencode, codex, gemini, etc.) ALWAYS go through `agent-session` regardless of `$CLAUDE_BACKEND_MODE`. A mixed debate (e.g. claude + opencode roles) runs claude roles via Agent tool / SendMessage and opencode roles via `agent-session spawn` in the same round.
 
-**[MUST] Pass `--yolo` on every `agent-session spawn` and `run` call.** Without it, opencode backend blocks on its interactive permission prompt (no stdin to approve), and the role's child process sits at 0% CPU forever — manifests as 0-byte log files, role stuck at the prior round_count, and the entire debate stalls until manually killed. claude backend inherits permission context from the Claude Code parent and so does not exhibit the symptom — the failure is opencode-specific but unpredictable per round. Debate is a trusted analysis context (CLAUDE.md guidance), so `--yolo` is correct here; the agent-session binary translates it to `--dangerously-skip-permissions` for opencode and the equivalent for other backends. **`send` does NOT accept `--yolo`** — permission mode is persisted in `meta.json` at spawn time and inherited automatically on every subsequent send. **Confirmed 2026-05-14**: a 5-role discovery debate stalled three rounds in a row at exactly the 3 opencode roles before the missing flag was identified.
+**[MUST] Pass `--yolo` on every `agent-session spawn` and `run` call.** Debate is a trusted analysis context; `--yolo` bypasses interactive permission prompts that would block non-interactive subprocesses. Permission is persisted at spawn and inherited by all subsequent `send` calls — do not pass `--yolo` on `send`.
 
 ```bash
 # Derive whitelist from preset
@@ -655,7 +655,7 @@ dispatched in parallel.
 `run_in_background`.**
 
 ```bash
-# correct — foreground parallel (--yolo only needed on spawn, inherited by send)
+# correct — foreground parallel (permission inherited from spawn)
 for r in "${ACTIVE_ROLES[@]}"; do
   agent-session send --role-id "$r" \
     --state-dir "$SESSIONS_DIR" \
@@ -664,39 +664,21 @@ for r in "${ACTIVE_ROLES[@]}"; do
   pids+=("$!")
 done
 for pid in "${pids[@]}"; do
-  wait "$pid"   # NB: each pid independently quoted — never wait "${pid}${suffix}"
+  wait "$pid"
 done
 ```
 
 Why foreground: keeps the orchestrator's control flow synchronous — the
 moderator sees per-role exit codes immediately and can react in the same
-turn. Acceptable wall-clock: 4 parallel 30-60s sends fit comfortably within
-Bash tool's 600s timeout (see [MUST] below).
+turn.
 
-**Historical note.** A 2026-05-12 debate run hung 13 min with sends that
-never launched and was originally attributed to "double-bg severs
-stdio/job control" if `run_in_background` were used. That attribution was
-wrong — 2026-05-14 reproduction with sleep / Python+stdin children under
-`run_in_background` did **not** hang, and the real 2026-05-12 / 2026-05-14
-failures were both caused by missing `--yolo` (opencode blocking on
-permission prompt). Keep foreground anyway for the control-flow reason
-above; don't expect background to cause stdio severance.
-
-**[MUST] Bash tool `timeout: 600000`.** `agent-session --timeout` only
-bounds the agent-session subprocess; the outer Bash tool has a 120s
-default that will SIGKILL the whole wait block at 2 min. Set 600000
-(10 min) on the Bash call wrapping spawn/send fan-out. **Do NOT** reach
-for `run_in_background: true` as an escape hatch — that breaks the
-foreground synchronous flow above; the right fix is a larger Bash
-timeout.
+**[MUST] Bash tool `timeout: 600000`.** The outer Bash tool has a 120s
+default. Set 600000 (10 min) on the Bash call wrapping spawn/send
+fan-out. Do NOT use `run_in_background: true` as a workaround.
 
 **[MUST] Single Bash call for fan-out.** All roles must be backgrounded
-(`&`) and waited within **one** Bash tool invocation. Spawning N roles
-across N separate Bash calls serializes them — wall-clock = sum-of-roles
-instead of max-of-roles — silently negating the parallelism the [MUST]
-above is trying to preserve. If a model is tempted to "send each role in
-its own Bash call to keep the logs clean", redirect each send's output to
-a separate log file inside the single Bash call instead.
+(`&`) and waited within **one** Bash tool invocation. Separate Bash calls
+serialize them (wall-clock = sum instead of max).
 
 **[MUST] Collect per-role exit codes AND verify output.** A bare `wait` without arguments only waits, it doesn't surface individual failures. A round where `agent-session send` rejected a flag (e.g. `unrecognized arguments`) silently and `tldr` later returns the *previous round's* cached output is the classic false-success trap. Use this hardened pattern:
 
@@ -1297,32 +1279,22 @@ Cleanup must be idempotent — repeating it is a no-op; ignore "session not foun
 
 **绝对不要**：
 
-1. **`agent-session spawn/run` 不带 `--yolo`**：opencode backend 会阻塞
-   在交互式权限确认（没有 stdin 来 approve），child 进程在 0% CPU 永久等待，
-   表现为 0 字节 log + role 卡在前一 round_count + debate 整个 stall。
-   claude backend 因为继承 Claude Code 父进程的权限上下文不出问题，所以症状
-   是 opencode-specific 但随机。**正确做法**：所有 spawn/run 一律带
-   `--yolo`（debate 是受信任的分析场景，符合 CLAUDE.md 指引）。`send` 不需要
-   也不接受 `--yolo` — 权限在 spawn 时写入 `meta.json`，后续 send 自动继承。
+1. **`agent-session spawn/run` 不带 `--yolo`**：非交互子进程会阻塞在权限确认上，
+   debate 整个 stall。`send` 不需要也不接受 `--yolo`（spawn 时已持久化）。
 
 2. **用 ScheduleWakeup 等 debate 多 role send**：盲等卡死的进程会浪费完整
    wakeup 周期才发现问题。**正确做法**：foreground `wait` PID（见 §Round N
    pattern），send 失败/超时立刻可见。
 
-3. **`wait` 拼接变量不加分隔**：`wait "$pid$role"` 被 shell 解析为单变量名
-   `$pidrole`，找不到对应 PID 报 `job not found: 65081ole-a`（拼接 PID + role
-   name 后丢前导字符）。**正确做法**：`wait "$pid"` —— 每个变量独立 quote，
-   永远不在 wait 参数里串变量。如需打日志拼字符串，用其他变量分开处理。
+3. **`wait` 拼接变量不加分隔**：`wait "$pid$role"` 会被 shell 解析为单变量名。
+   **正确做法**：`wait "$pid"` — 每个变量独立 quote。
 
 4. **fan-out 跨多个 Bash 调用**：每个 role 单独一个 Bash tool call 调
-   `agent-session send` 会把并发退化成串行，wall-clock 从 max-of-roles 变成
-   sum-of-roles。**正确做法**：单一 Bash call 内部 `& wait`，每个 send
-   重定向到独立 log 文件。
+   `agent-session send` 会把并发退化成串行。**正确做法**：单一 Bash call 内部
+   `& wait`。
 
-5. **Bash tool 用默认 timeout 跑 send fan-out**：默认 120s 会在 2 分钟时把
-   整个 wait 块 SIGKILL，掩盖真正的进度。**正确做法**：调用 Bash 时显式传
-   `timeout: 600000`。不要用 `run_in_background: true` 来"绕开" timeout —
-   那会破坏 §Round N Send 块要求的前台同步控制流。
+5. **Bash tool 用默认 timeout 跑 send fan-out**：默认 120s 会 SIGKILL 整个
+   wait 块。**正确做法**：显式传 `timeout: 600000`。
 
 ---
 
