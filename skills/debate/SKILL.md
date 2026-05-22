@@ -439,7 +439,7 @@ Debate needs a **persistent multi-turn session per role**, with shared lifetime 
 
 Non-claude backends (opencode, codex, gemini, etc.) ALWAYS go through `agent-session` regardless of `$CLAUDE_BACKEND_MODE`. A mixed debate (e.g. claude + opencode roles) runs claude roles via Agent tool / SendMessage and opencode roles via `agent-session spawn` in the same round.
 
-**[MUST] Pass `--yolo` on every `agent-session spawn` / `send` / `run` call.** Without it, opencode backend blocks on its interactive permission prompt (no stdin to approve), and the role's child process sits at 0% CPU forever — manifests as 0-byte log files, role stuck at the prior round_count, and the entire debate stalls until manually killed. claude backend inherits permission context from the Claude Code parent and so does not exhibit the symptom — the failure is opencode-specific but unpredictable per round. Debate is a trusted analysis context (CLAUDE.md guidance), so `--yolo` is correct here; the agent-session binary translates it to `--dangerously-skip-permissions` for opencode and the equivalent for other backends. **Confirmed 2026-05-14**: a 5-role discovery debate stalled three rounds in a row at exactly the 3 opencode roles before the missing flag was identified.
+**[MUST] Pass `--yolo` on every `agent-session spawn` and `run` call.** Without it, opencode backend blocks on its interactive permission prompt (no stdin to approve), and the role's child process sits at 0% CPU forever — manifests as 0-byte log files, role stuck at the prior round_count, and the entire debate stalls until manually killed. claude backend inherits permission context from the Claude Code parent and so does not exhibit the symptom — the failure is opencode-specific but unpredictable per round. Debate is a trusted analysis context (CLAUDE.md guidance), so `--yolo` is correct here; the agent-session binary translates it to `--dangerously-skip-permissions` for opencode and the equivalent for other backends. **`send` does NOT accept `--yolo`** — permission mode is persisted in `meta.json` at spawn time and inherited automatically on every subsequent send. **Confirmed 2026-05-14**: a 5-role discovery debate stalled three rounds in a row at exactly the 3 opencode roles before the missing flag was identified.
 
 ```bash
 # Derive whitelist from preset
@@ -655,12 +655,11 @@ dispatched in parallel.
 `run_in_background`.**
 
 ```bash
-# correct — foreground parallel, --yolo on every send (see §2.5 MUST)
+# correct — foreground parallel (--yolo only needed on spawn, inherited by send)
 for r in "${ACTIVE_ROLES[@]}"; do
   agent-session send --role-id "$r" \
     --state-dir "$SESSIONS_DIR" \
     --prompt-file "$DEBATE_DIR/r${N}.md" \
-    --yolo \
     --timeout 1800 > "$DEBATE_DIR/logs/send-${r}-r${N}.log" 2>&1 &
   pids+=("$!")
 done
@@ -707,7 +706,6 @@ for r in "${ACTIVE_ROLES[@]}"; do
   agent-session send --role-id "$r" \
     --prompt-file "$DEBATE_DIR/rN.md" \
     --state-dir "$SESSIONS_DIR" \
-    --yolo \
     --timeout 1800 > "$DEBATE_DIR/logs/send-${r}-rN.log" 2>&1 &
   pids+=("$!")
   role_for_pid["$!"]="$r"
@@ -735,7 +733,7 @@ for entry in "${failed[@]}"; do
   role="${entry%%:*}"
   err=$(agent-session describe --role-id "$role" --state-dir "$SESSIONS_DIR" | jq -r '.error // ""')
   if echo "$err" | grep -q "timed out"; then
-    agent-session send --role-id "$role" --force --yolo --timeout 1500 \
+    agent-session send --role-id "$role" --force --timeout 1500 \
       --prompt-file "$DEBATE_DIR/rN.md" --state-dir "$SESSIONS_DIR"
   fi
 done
@@ -790,7 +788,6 @@ agent-session spawn \
 agent-session send \
   --role-id "$r" --state-dir "$SESSIONS_DIR" \
   --prompt-file "$DEBATE_DIR/r${N}.md" \
-  --yolo \
   --timeout 1800
 ```
 
@@ -953,8 +950,7 @@ Re-spawning is expensive (loses the role's full conversation history) and readin
 
    agent-session send --role-id "$r" \
      --prompt-file "$DEBATE_DIR/format-correction-${r}.md" \
-     --state-dir "$SESSIONS_DIR" \
-     --yolo
+     --state-dir "$SESSIONS_DIR"
    ```
 
    `{ROLE_NARROWED_WHITELIST}` / `{ROUND_ALLOWED_STAGES}` are runtime substitutions the
@@ -1090,7 +1086,7 @@ the moderator brings Compiler online:
 
    ```bash
    agent-session send --role-id compiler --state-dir "$SESSIONS_DIR" \
-     --prompt-file "$DEBATE_DIR/checkpoint-${N}-input.md" --yolo --timeout 900
+     --prompt-file "$DEBATE_DIR/checkpoint-${N}-input.md" --timeout 900
    ```
 
    On second+ checkpoint Compiler's session retains earlier checkpoints, so the
@@ -1122,7 +1118,7 @@ the moderator brings Compiler online:
    "we recommend", "best option". Send only the corrected reply.
    EOF
      agent-session send --role-id compiler --state-dir "$SESSIONS_DIR" \
-       --prompt-file "$DEBATE_DIR/compiler-correction.md" --yolo --timeout 900
+       --prompt-file "$DEBATE_DIR/compiler-correction.md" --timeout 900
      c_out=$(agent-session output --role-id compiler --state-dir "$SESSIONS_DIR")
    fi
    ```
@@ -1301,14 +1297,13 @@ Cleanup must be idempotent — repeating it is a no-op; ignore "session not foun
 
 **绝对不要**：
 
-1. **`agent-session spawn/send/run` 不带 `--yolo`**：opencode backend 会阻塞
+1. **`agent-session spawn/run` 不带 `--yolo`**：opencode backend 会阻塞
    在交互式权限确认（没有 stdin 来 approve），child 进程在 0% CPU 永久等待，
    表现为 0 字节 log + role 卡在前一 round_count + debate 整个 stall。
    claude backend 因为继承 Claude Code 父进程的权限上下文不出问题，所以症状
-   是 opencode-specific 但随机。**正确做法**：所有 spawn/send/run 一律带
-   `--yolo`（debate 是受信任的分析场景，符合 CLAUDE.md 指引）。2026-05-12 和
-   2026-05-14 各有一次 5-role discovery debate 因为这条卡住三轮，前者被错误
-   归因为 "double-bg job control 切断"，2026-05-14 reproduction 证伪了归因。
+   是 opencode-specific 但随机。**正确做法**：所有 spawn/run 一律带
+   `--yolo`（debate 是受信任的分析场景，符合 CLAUDE.md 指引）。`send` 不需要
+   也不接受 `--yolo` — 权限在 spawn 时写入 `meta.json`，后续 send 自动继承。
 
 2. **用 ScheduleWakeup 等 debate 多 role send**：盲等卡死的进程会浪费完整
    wakeup 周期才发现问题。**正确做法**：foreground `wait` PID（见 §Round N
